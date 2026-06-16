@@ -1,4 +1,7 @@
 import RoonApi, { type RoonCore } from "node-roon-api";
+import RoonApiBrowse, {
+  type RoonApiBrowse as RoonBrowseService,
+} from "node-roon-api-browse";
 import RoonApiStatus from "node-roon-api-status";
 import RoonApiTransport, {
   type RoonApiTransport as RoonTransportService,
@@ -59,7 +62,7 @@ export class RoonClient {
   /** Initialize services and begin Core discovery. */
   start(): void {
     this.roon.init_services({
-      required_services: [RoonApiTransport],
+      required_services: [RoonApiTransport, RoonApiBrowse],
       provided_services: [this.status],
     });
     this.status.set_status("Waiting for Roon Core…", false);
@@ -108,6 +111,14 @@ export class RoonClient {
       throw new RoonMcpError("NO_CORE_PAIRED", "No Roon Core is currently paired.");
     }
     return this.core.services.RoonApiTransport;
+  }
+
+  /** Browse service of the currently paired Core. Throws if unpaired. */
+  getBrowse(): RoonBrowseService {
+    if (!this.core) {
+      throw new RoonMcpError("NO_CORE_PAIRED", "No Roon Core is currently paired.");
+    }
+    return this.core.services.RoonApiBrowse;
   }
 
   private onCorePaired(core: RoonCore): void {

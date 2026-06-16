@@ -22,6 +22,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "node-roon-api": "github:RoonLabs/node-roon-api",
+    "node-roon-api-browse": "github:RoonLabs/node-roon-api-browse",
     "node-roon-api-status": "github:RoonLabs/node-roon-api-status",
     "node-roon-api-transport": "github:RoonLabs/node-roon-api-transport",
     "zod": "^3.23.8"

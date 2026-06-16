@@ -4,14 +4,20 @@ A minimal [MCP](https://modelcontextprotocol.io) server to control the **Roon** 
 
 Built on the official Roon Extension API (`node-roon-api` + `node-roon-api-transport`).
 
-## Status — Milestone 1: connection & zone read
+## Status
 
+**Milestone 1 — connection & zone read** ✅
 - [x] MCP server shell (stdio transport)
 - [x] Pair with a Roon Core (`RoonClient`)
 - [x] Read zones (`ZoneService`)
 - [x] `list_zones()` tool
 
-Later milestones add search, single-item playback, track expansion, and curated queues — see the implementation plan.
+**Milestone 2 — search** ✅
+- [x] Serialized `BrowseSessionManager` (one lock over all browse work)
+- [x] `search_music()` with type filtering and broadening
+- [x] Candidate ranking by title relevance + type
+
+Later milestones add single-item playback, track expansion, and curated queues — see the implementation plan.
 
 ## Setup
 
@@ -48,6 +54,7 @@ protocol.
 | Tool | Purpose |
 | --- | --- |
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
+| `search_music({ query, type?, limit? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). |
 
 ## Develop
 

@@ -20,6 +20,7 @@ declare module "node-roon-api" {
     display_version: string;
     services: {
       RoonApiTransport: import("node-roon-api-transport").RoonApiTransport;
+      RoonApiBrowse: import("node-roon-api-browse").RoonApiBrowse;
       [service: string]: unknown;
     };
   }
@@ -45,6 +46,95 @@ declare module "node-roon-api-status" {
     constructor(roon: RoonApi);
     set_status(message: string, is_error: boolean): void;
   }
+}
+
+declare module "node-roon-api-browse" {
+  export type BrowseHierarchy =
+    | "browse"
+    | "playlists"
+    | "settings"
+    | "internet_radio"
+    | "albums"
+    | "artists"
+    | "genres"
+    | "composers"
+    | "search";
+
+  /** item hint = null | "action" | "action_list" | "list" | "header" */
+  export type BrowseItemHint = "action" | "action_list" | "list" | "header" | null;
+
+  export interface BrowseItem {
+    title: string;
+    subtitle?: string;
+    image_key?: string;
+    item_key?: string;
+    hint?: BrowseItemHint;
+    input_prompt?: {
+      prompt: string;
+      action: string;
+      value?: string;
+      is_password: boolean;
+    };
+  }
+
+  export interface BrowseList {
+    title: string;
+    count: number;
+    subtitle?: string;
+    image_key?: string;
+    level: number;
+    display_offset?: number;
+    hint?: "action_list" | null;
+  }
+
+  export interface BrowseOptions {
+    hierarchy: BrowseHierarchy;
+    multi_session_key?: string;
+    item_key?: string;
+    input?: string;
+    zone_or_output_id?: string;
+    pop_all?: boolean;
+    pop_levels?: number;
+    refresh_list?: boolean;
+    set_display_offset?: number;
+  }
+
+  export interface BrowseResultBody {
+    action: "message" | "none" | "list" | "replace_item" | "remove_item";
+    item?: BrowseItem;
+    list?: BrowseList;
+    message?: string;
+    is_error?: boolean;
+  }
+
+  export interface LoadOptions {
+    hierarchy: BrowseHierarchy;
+    multi_session_key?: string;
+    level?: number;
+    offset?: number;
+    count?: number;
+    set_display_offset?: number;
+  }
+
+  export interface LoadResultBody {
+    items: BrowseItem[];
+    offset: number;
+    list: BrowseList;
+  }
+
+  export class RoonApiBrowse {
+    browse(
+      opts: BrowseOptions,
+      cb: (error: string | false, body: BrowseResultBody) => void,
+    ): void;
+    load(
+      opts: LoadOptions,
+      cb: (error: string | false, body: LoadResultBody) => void,
+    ): void;
+  }
+
+  const _default: typeof RoonApiBrowse;
+  export default _default;
 }
 
 declare module "node-roon-api-transport" {

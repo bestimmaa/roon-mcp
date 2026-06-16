@@ -1,9 +1,21 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 import { RoonClient } from "./RoonClient.js";
+import { SearchService } from "./SearchService.js";
 import { ZoneService } from "./ZoneService.js";
 import { RoonMcpError } from "./types.js";
+
+const MUSIC_ITEM_TYPES = [
+  "artist",
+  "album",
+  "track",
+  "genre",
+  "playlist",
+  "radio",
+  "unknown",
+] as const;
 
 /**
  * Owns MCP startup and tool registration, and maps tool calls to services.
@@ -15,6 +27,7 @@ export class RoonMcpServer {
   constructor(
     private readonly roon: RoonClient,
     private readonly zones: ZoneService,
+    private readonly search: SearchService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -39,6 +52,40 @@ export class RoonMcpServer {
           const message =
             zones.length === 0 ? "No zones available on the paired Core." : undefined;
           return structured({ zones, ...(message ? { message } : {}) });
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "search_music",
+      {
+        title: "Search Roon music",
+        description:
+          "Resolve a text query into ranked Roon browse candidates. Optionally " +
+          "filter by item type (artist, album, track, genre, playlist, radio); " +
+          "if a typed search is empty the server broadens to all categories. " +
+          "Returns opaque, session-scoped item keys for use by playback tools.",
+        inputSchema: {
+          query: z.string().min(1).describe("Free-text search, e.g. 'Dark Ambient' or 'Tycho'."),
+          type: z
+            .enum(MUSIC_ITEM_TYPES)
+            .optional()
+            .describe("Restrict results to this item type."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe("Max candidates to return (default 10)."),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.search.searchMusic(args);
+          return structured(result);
         } catch (err) {
           return toToolError(err);
         }
