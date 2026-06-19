@@ -48,18 +48,9 @@ export class SearchService {
   async searchMusic(input: SearchMusicInput): Promise<SearchMusicOutput> {
     const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
 
-    return this.browse.runExclusive(async () => {
-      try {
-        return await this.performSearch(input, limit);
-      } catch (err) {
-        // Stale session / invalid key: reset the hierarchy and retry once.
-        if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") {
-          await this.browse.resetSearchHierarchy();
-          return this.performSearch(input, limit);
-        }
-        throw err;
-      }
-    });
+    // Search builds its own item keys inside performSearch, so a stale-session
+    // failure is recoverable with one reset-and-replay (see runExclusiveWithRetry).
+    return this.browse.runExclusiveWithRetry(() => this.performSearch(input, limit));
   }
 
   private async performSearch(

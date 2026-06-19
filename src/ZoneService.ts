@@ -5,6 +5,7 @@ import type {
 } from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
+import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { RoonMcpError, type RoonZone, type ZoneState } from "./types.js";
 
 export interface ZoneResolutionAmbiguous {
@@ -37,7 +38,10 @@ function toRoonZone(zone: RoonApiZone): RoonZone {
 
 /** Reads and ranks Roon zones via the Transport service. */
 export class ZoneService {
-  constructor(private readonly roon: RoonClient) {}
+  constructor(
+    private readonly roon: RoonClient,
+    private readonly logger: RoonCallLogger = silentLogger,
+  ) {}
 
   /** List all playable zones exposed by the paired Core. */
   async listZones(): Promise<RoonZone[]> {
@@ -75,15 +79,21 @@ export class ZoneService {
     await this.roon.waitForCore();
     const transport = this.roon.getTransport();
 
-    return new Promise<GetZonesBody>((resolve, reject) => {
-      transport.get_zones((error, result) => {
-        if (error) {
-          reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${error}`));
-          return;
-        }
-        resolve(result);
-      });
-    });
+    return this.logger.call(
+      "get_zones",
+      {},
+      () =>
+        new Promise<GetZonesBody>((resolve, reject) => {
+          transport.get_zones((error, result) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${error}`));
+              return;
+            }
+            resolve(result);
+          });
+        }),
+      (body) => ({ zones: body.zones?.length ?? 0 }),
+    );
   }
 
   /**

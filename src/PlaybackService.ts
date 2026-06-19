@@ -2,6 +2,7 @@ import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
+import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { ZoneService } from "./ZoneService.js";
 import {
   RoonMcpError,
@@ -64,6 +65,7 @@ export class PlaybackService {
     private readonly browse: BrowseSessionManager,
     private readonly zones: ZoneService,
     private readonly roon: RoonClient,
+    private readonly logger: RoonCallLogger = silentLogger,
   ) {}
 
   /** Start a single search candidate playing immediately in the given zone. */
@@ -339,10 +341,16 @@ export class PlaybackService {
     }
     if (typeof transport.change_settings !== "function") return false;
 
-    return new Promise<boolean>((resolve) => {
-      transport.change_settings!(zoneId, { shuffle: enabled }, (error) => {
-        resolve(!error);
-      });
-    });
+    return this.logger.call(
+      "change_settings",
+      { zoneId, settings: { shuffle: enabled } },
+      () =>
+        new Promise<boolean>((resolve) => {
+          transport.change_settings!(zoneId, { shuffle: enabled }, (error) => {
+            resolve(!error);
+          });
+        }),
+      (applied) => ({ applied }),
+    );
   }
 }

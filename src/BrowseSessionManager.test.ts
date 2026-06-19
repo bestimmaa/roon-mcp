@@ -67,3 +67,38 @@ test("browse maps other errors to BROWSE_FAILED", async () => {
     (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
   );
 });
+
+test("runExclusiveWithRetry resets and replays once on a stale session", async () => {
+  // pop_all (the reset) is a browse call; count it to prove the reset happened.
+  let popAlls = 0;
+  const mgr = managerWithBrowse({
+    browse: (opts: { pop_all?: boolean }, cb: (e: string | false, b: unknown) => void) => {
+      if (opts.pop_all) popAlls++;
+      cb(false, { action: "list" });
+    },
+  });
+
+  let attempts = 0;
+  const out = await mgr.runExclusiveWithRetry(async () => {
+    attempts++;
+    if (attempts === 1) throw new RoonMcpError("INVALID_ITEM_KEY", "stale");
+    return "ok";
+  });
+
+  assert.equal(out, "ok");
+  assert.equal(attempts, 2);
+  assert.equal(popAlls, 1); // reset happened between the two attempts
+});
+
+test("runExclusiveWithRetry does not retry non-retryable errors", async () => {
+  const mgr = managerWithBrowse({});
+  let attempts = 0;
+  await assert.rejects(
+    mgr.runExclusiveWithRetry(async () => {
+      attempts++;
+      throw new RoonMcpError("BROWSE_FAILED", "fatal");
+    }),
+    (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+  );
+  assert.equal(attempts, 1);
+});

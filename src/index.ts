@@ -6,6 +6,7 @@ import { RoonMcpServer } from "./RoonMcpServer.js";
 import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
+import { createStderrLogger } from "./logger.js";
 
 // node-roon-api logs discovery chatter via console.log. On a stdio MCP server
 // stdout is reserved for JSON-RPC, so route all console output to stderr.
@@ -16,12 +17,15 @@ for (const method of ["log", "info", "debug", "warn"] as const) {
 }
 
 async function main(): Promise<void> {
+  // One structured logger shared across services; emits [roon-call] lines to
+  // stderr so stdout stays reserved for the MCP JSON-RPC stream.
+  const logger = createStderrLogger();
   const roon = new RoonClient();
-  const zones = new ZoneService(roon);
-  const browse = new BrowseSessionManager(roon);
+  const zones = new ZoneService(roon, logger);
+  const browse = new BrowseSessionManager(roon, logger);
   const search = new SearchService(browse);
   const tracks = new TrackExpansionService(browse);
-  const playback = new PlaybackService(browse, zones, roon);
+  const playback = new PlaybackService(browse, zones, roon, logger);
   const server = new RoonMcpServer(roon, zones, search, tracks, playback);
 
   const shutdown = () => {
