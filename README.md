@@ -22,7 +22,13 @@ Built on the official Roon Extension API (`node-roon-api` + `node-roon-api-trans
 - [x] `play_now()` against a zone or output id
 - [x] Shuffle via a Shuffle action, with a best-effort Transport `change_settings` fallback
 
-Later milestones add track expansion and curated queues — see the implementation plan.
+**Milestone 4 — track expansion & curated queue** ✅
+- [x] `get_tracks_for()` expands artist/album/genre/playlist candidates into tracks
+- [x] `enqueue_and_play()` starts the first item (Play Now) and appends the rest (Queue)
+- [x] Partial-failure handling: skipped items are reported with reasons, not fatal
+
+Later milestones add hardening (retries, structured logs, integration scripts) — see
+the implementation plan.
 
 ## Setup
 
@@ -60,7 +66,9 @@ protocol.
 | --- | --- |
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
 | `search_music({ query, type?, limit? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). |
+| `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
 | `play_now({ zoneId, itemKey, shuffle? })` | Immediately play one search candidate in a zone/output; optional shuffle. |
+| `enqueue_and_play({ zoneId, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it; reports queued/skipped. |
 
 ## Develop
 

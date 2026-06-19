@@ -247,3 +247,113 @@ test("a failed action invocation reopens the item and retries once", async () =>
   // Only the successful retry is recorded as an invocation.
   assert.deepEqual(browse.invocations, [{ itemKey: "act:play", zone: "z1" }]);
 });
+
+test("enqueue starts the first item with Play Now and appends the rest with Queue", async () => {
+  const { svc, browse } = build(
+    {
+      "t:1": [action("Play Now", "p1"), action("Add to Queue", "q1")],
+      "t:2": [action("Play Now", "p2"), action("Add to Queue", "q2")],
+      "t:3": [action("Play Now", "p3"), action("Add to Queue", "q3")],
+    },
+    ["p1", "q1", "p2", "q2", "p3", "q3"],
+  );
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "t:2", "t:3"] });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 3);
+  assert.equal(out.requested, 3);
+  assert.deepEqual(out.skipped, []);
+  // First via Play Now, the rest appended via Add to Queue (order preserved).
+  assert.deepEqual(
+    browse.invocations.map((i) => i.itemKey),
+    ["p1", "q2", "q3"],
+  );
+});
+
+test("enqueue skips a non-playable middle item and queues the rest", async () => {
+  const { svc } = build(
+    {
+      "t:1": [action("Play Now", "p1")],
+      bad: { message: "Unavailable." },
+      "t:3": [action("Play Now", "p3"), action("Queue", "q3")],
+    },
+    ["p1", "p3", "q3"],
+  );
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "bad", "t:3"] });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 2);
+  assert.equal(out.skipped.length, 1);
+  assert.equal(out.skipped[0]?.itemKey, "bad");
+  assert.match(out.skipped[0]?.reason ?? "", /unavailable/i);
+});
+
+test("enqueue falls through to the next item as the queue starter", async () => {
+  const { svc, browse } = build(
+    {
+      bad: { message: "Nope." },
+      "t:2": [action("Play Now", "p2"), action("Queue", "q2")],
+      "t:3": [action("Play Now", "p3"), action("Queue", "q3")],
+    },
+    ["p2", "q2", "p3", "q3"],
+  );
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["bad", "t:2", "t:3"] });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 2);
+  assert.equal(out.skipped[0]?.itemKey, "bad");
+  assert.deepEqual(
+    browse.invocations.map((i) => i.itemKey),
+    ["p2", "q3"],
+  );
+});
+
+test("enqueue with no startable items reports ok:false and queued 0", async () => {
+  const { svc } = build(
+    { bad1: { message: "No." }, bad2: { message: "No." } },
+    [],
+  );
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["bad1", "bad2"] });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.queued, 0);
+  assert.equal(out.skipped.length, 2);
+});
+
+test("enqueue skips a stale (invalid) item key instead of failing the call", async () => {
+  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"]);
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "ghost"] });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 1);
+  assert.equal(out.skipped[0]?.itemKey, "ghost");
+});
+
+test("enqueue applies shuffle via Transport only when requested", async () => {
+  const transport = new FakeTransport([ZONE]);
+  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1"], shuffle: true });
+  assert.deepEqual(transport.shuffleCalls, [{ zone: "z1", shuffle: true }]);
+});
+
+test("enqueue leaves the zone's shuffle setting untouched when shuffle is omitted", async () => {
+  const transport = new FakeTransport([ZONE]);
+  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1"] });
+  assert.deepEqual(transport.shuffleCalls, []);
+});
+
+test("enqueue rejects an unknown zone id with ZONE_NOT_FOUND", async () => {
+  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"]);
+  await assert.rejects(
+    svc.enqueueAndPlay({ zoneId: "nope", itemKeys: ["t:1"] }),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
+  );
+});

@@ -43,11 +43,40 @@ export interface SearchMusicOutput {
   message?: string;
 }
 
+export interface GetTracksForInput {
+  /** Opaque, session-scoped item key from a recent `search_music` result. */
+  itemKey: string;
+  limit?: number;
+}
+
+export interface TrackCandidate {
+  itemKey: string;
+  title: string;
+  artist?: string;
+  album?: string;
+  durationSec?: number;
+  available: boolean;
+}
+
+export interface GetTracksForOutput {
+  sourceItemKey: string;
+  tracks: TrackCandidate[];
+  skipped: Array<{ itemKey?: string; reason: string }>;
+}
+
 export interface PlayNowInput {
   /** Zone id or any of its output ids (from `list_zones`). */
   zoneId: string;
   /** Opaque, session-scoped item key from a recent `search_music` result. */
   itemKey: string;
+  shuffle?: boolean;
+}
+
+export interface EnqueueAndPlayInput {
+  /** Zone id or any of its output ids (from `list_zones`). */
+  zoneId: string;
+  /** Ordered, session-scoped item keys (e.g. from `get_tracks_for`). */
+  itemKeys: string[];
   shuffle?: boolean;
 }
 
@@ -60,6 +89,11 @@ export interface PlaybackResult {
   /** Best-effort "now playing" line read just after the action; may be stale. */
   nowPlaying?: string;
   message?: string;
+}
+
+export interface EnqueueAndPlayOutput extends PlaybackResult {
+  /** Number of item keys the caller asked to queue. */
+  requested: number;
 }
 
 export type RoonMcpErrorCode =

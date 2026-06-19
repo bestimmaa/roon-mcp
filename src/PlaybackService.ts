@@ -3,7 +3,13 @@ import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { ZoneService } from "./ZoneService.js";
-import { RoonMcpError, type PlaybackResult, type PlayNowInput } from "./types.js";
+import {
+  RoonMcpError,
+  type EnqueueAndPlayInput,
+  type EnqueueAndPlayOutput,
+  type PlaybackResult,
+  type PlayNowInput,
+} from "./types.js";
 
 // Item keys handed to playback originate from `search_music`, so we drive the
 // playback drill in the same hierarchy that produced them.
@@ -24,6 +30,9 @@ const PLAY_LABELS = [
   "start radio",
 ];
 const SHUFFLE_LABELS = ["shuffle"];
+// For curated, ordered queues we append to the end ("Add to Queue"/"Queue")
+// rather than "Add Next", which would reverse the order on repeated calls.
+const QUEUE_LABELS = ["add to queue", "queue", "add next"];
 
 function normalize(text: string): string {
   return text.trim().toLowerCase();
@@ -35,9 +44,8 @@ function isActionItem(item: BrowseItem): boolean {
 }
 
 /** Pick the best-matching action by label preference (exact, then prefix). */
-function pickAction(items: BrowseItem[], shuffle: boolean): BrowseItem | null {
+function pickAction(items: BrowseItem[], labels: string[]): BrowseItem | null {
   const actions = items.filter(isActionItem);
-  const labels = shuffle ? [...SHUFFLE_LABELS, ...PLAY_LABELS] : PLAY_LABELS;
 
   for (const label of labels) {
     const hit = actions.find((a) => normalize(a.title) === label);
@@ -102,7 +110,8 @@ export class PlaybackService {
     }
 
     // 2. Discover a play (or shuffle) action among the item's options.
-    const action = await this.findPlayAction(shuffle);
+    const labels = shuffle ? [...SHUFFLE_LABELS, ...PLAY_LABELS] : PLAY_LABELS;
+    const { action } = await this.findAction(labels);
     if (!action) {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
@@ -126,7 +135,7 @@ export class PlaybackService {
     //    the Transport setting as a best-effort fallback.
     let shuffleNote: string | undefined;
     if (shuffle && !usedShuffleAction) {
-      const applied = await this.trySetShuffle(zoneId);
+      const applied = await this.trySetShuffle(zoneId, true);
       if (!applied) {
         shuffleNote =
           " Shuffle was requested but could not be applied (no shuffle action and Transport setting unavailable).";
@@ -145,25 +154,167 @@ export class PlaybackService {
     };
   }
 
+  /**
+   * Build an ad-hoc queue from curated item keys and start it playing. The
+   * first playable item starts via "Play Now"; the rest append via "Queue" /
+   * "Add to Queue". Items that can't be opened/queued are skipped and reported
+   * so the agent can backfill, rather than failing the whole call.
+   */
+  async enqueueAndPlay(input: EnqueueAndPlayInput): Promise<EnqueueAndPlayOutput> {
+    const zone = await this.zones.findZone(input.zoneId);
+    if (!zone) {
+      throw new RoonMcpError(
+        "ZONE_NOT_FOUND",
+        `No zone or output matches id "${input.zoneId}". Call list_zones for current ids.`,
+      );
+    }
+
+    const requested = input.itemKeys.length;
+    if (requested === 0) {
+      return {
+        ok: false,
+        zoneId: input.zoneId,
+        queued: 0,
+        requested: 0,
+        skipped: [],
+        message: "No item keys were provided.",
+      };
+    }
+
+    return this.browse.runExclusive(async () => {
+      const skipped: Array<{ itemKey: string; reason: string }> = [];
+      let queued = 0;
+      let index = 0;
+
+      // 1. Start the queue with the first item that can Play Now. If the first
+      //    can't play, fall through to the next as the queue starter.
+      let started = false;
+      for (; index < input.itemKeys.length; index++) {
+        const key = input.itemKeys[index]!;
+        const outcome = await this.queueOne(key, input.zoneId, PLAY_LABELS);
+        if (outcome.ok) {
+          queued++;
+          started = true;
+          index++;
+          break;
+        }
+        skipped.push({ itemKey: key, reason: outcome.reason });
+      }
+
+      if (!started) {
+        return {
+          ok: false,
+          zoneId: input.zoneId,
+          queued: 0,
+          requested,
+          skipped,
+          message: "No provided item could start playback.",
+        };
+      }
+
+      // 2. Append the remaining items in order.
+      for (; index < input.itemKeys.length; index++) {
+        const key = input.itemKeys[index]!;
+        const outcome = await this.queueOne(key, input.zoneId, QUEUE_LABELS);
+        if (outcome.ok) queued++;
+        else skipped.push({ itemKey: key, reason: outcome.reason });
+      }
+
+      // 3. Apply shuffle only when explicitly requested (leave the zone's
+      //    setting untouched otherwise). Best-effort via Transport.
+      let shuffleNote: string | undefined;
+      if (input.shuffle !== undefined) {
+        const applied = await this.trySetShuffle(input.zoneId, input.shuffle);
+        if (!applied) {
+          shuffleNote = ` Shuffle ${input.shuffle ? "on" : "off"} could not be applied (Transport setting unavailable).`;
+        }
+      }
+
+      const nowPlaying = await this.zones.nowPlayingFor(input.zoneId).catch(() => undefined);
+      const message =
+        `Queued ${queued} of ${requested} item(s)` +
+        (skipped.length > 0 ? `, skipped ${skipped.length}.` : ".") +
+        (shuffleNote ?? "");
+
+      return { ok: queued > 0, zoneId: input.zoneId, queued, requested, skipped, nowPlaying, message };
+    });
+  }
+
+  /**
+   * Open one item, find a matching action, and invoke it against the zone.
+   * Always pops back to the level the item key lives on, so the next curated
+   * key still resolves. Per-item Roon failures are returned (not thrown) so the
+   * enqueue loop can skip and continue.
+   */
+  private async queueOne(
+    itemKey: string,
+    zoneId: string,
+    labels: string[],
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    let levelsPushed = 0;
+    try {
+      const opened = await this.openItem(itemKey);
+      if (opened.action === "message") {
+        return { ok: false, reason: opened.message ?? "Item is not playable." };
+      }
+      if (opened.action === "list") levelsPushed += 1;
+
+      const { action, extraLevelsPushed } = await this.findAction(labels);
+      levelsPushed += extraLevelsPushed;
+      if (!action) return { ok: false, reason: "No matching play/queue action." };
+
+      const result = await this.browse.browse({
+        hierarchy: PLAY_HIERARCHY,
+        item_key: action.item_key!,
+        zone_or_output_id: zoneId,
+      });
+      if (result.action === "message" && result.is_error) {
+        return { ok: false, reason: result.message ?? "Action failed." };
+      }
+      return { ok: true };
+    } catch (err) {
+      // A stale key or a transient per-item browse failure shouldn't abort the
+      // whole queue; surface it as a skip reason. Fatal errors (e.g. no Core)
+      // still propagate.
+      if (
+        err instanceof RoonMcpError &&
+        (err.code === "INVALID_ITEM_KEY" || err.code === "BROWSE_FAILED")
+      ) {
+        return { ok: false, reason: err.message };
+      }
+      throw err;
+    } finally {
+      // Return to the curated item-key level for the next iteration.
+      if (levelsPushed > 0) {
+        await this.browse
+          .browse({ hierarchy: PLAY_HIERARCHY, pop_levels: levelsPushed })
+          .catch(() => undefined);
+      }
+    }
+  }
+
   /** Drill into an item key within the play hierarchy. */
   private async openItem(itemKey: string) {
     return this.browse.browse({ hierarchy: PLAY_HIERARCHY, item_key: itemKey });
   }
 
   /**
-   * Find a play/shuffle action for the currently-opened item. Inspects the
-   * loaded list directly, and drills one level into an `action_list` container
-   * if the actions aren't exposed at the top level.
+   * Find an action (by label preference) for the currently-opened item.
+   * Inspects the loaded list directly, and drills one level into an
+   * `action_list` container if the actions aren't exposed at the top level.
+   * Reports how many extra levels it pushed so callers can pop back.
    */
-  private async findPlayAction(shuffle: boolean): Promise<BrowseItem | null> {
+  private async findAction(
+    labels: string[],
+  ): Promise<{ action: BrowseItem | null; extraLevelsPushed: number }> {
     const loaded = await this.browse.load({
       hierarchy: PLAY_HIERARCHY,
       offset: 0,
       count: LOAD_COUNT,
     });
 
-    const direct = pickAction(loaded.items, shuffle);
-    if (direct) return direct;
+    const direct = pickAction(loaded.items, labels);
+    if (direct) return { action: direct, extraLevelsPushed: 0 };
 
     const container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
     if (container) {
@@ -173,13 +324,13 @@ export class PlaybackService {
         offset: 0,
         count: LOAD_COUNT,
       });
-      return pickAction(sub.items, shuffle);
+      return { action: pickAction(sub.items, labels), extraLevelsPushed: 1 };
     }
-    return null;
+    return { action: null, extraLevelsPushed: 0 };
   }
 
   /** Best-effort shuffle via Transport; returns false if unsupported/failed. */
-  private async trySetShuffle(zoneId: string): Promise<boolean> {
+  private async trySetShuffle(zoneId: string, enabled: boolean): Promise<boolean> {
     let transport;
     try {
       transport = this.roon.getTransport();
@@ -189,7 +340,7 @@ export class PlaybackService {
     if (typeof transport.change_settings !== "function") return false;
 
     return new Promise<boolean>((resolve) => {
-      transport.change_settings!(zoneId, { shuffle: true }, (error) => {
+      transport.change_settings!(zoneId, { shuffle: enabled }, (error) => {
         resolve(!error);
       });
     });

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
 import { RoonMcpError } from "./types.js";
 
@@ -29,6 +30,7 @@ export class RoonMcpServer {
     private readonly roon: RoonClient,
     private readonly zones: ZoneService,
     private readonly search: SearchService,
+    private readonly tracks: TrackExpansionService,
     private readonly playback: PlaybackService,
   ) {
     this.server = new McpServer({
@@ -95,6 +97,40 @@ export class RoonMcpServer {
     );
 
     this.server.registerTool(
+      "get_tracks_for",
+      {
+        title: "Expand a Roon item into tracks",
+        description:
+          "Expand an artist, album, genre, or playlist candidate into concrete " +
+          "playable tracks. Pass an itemKey from a recent search_music result. " +
+          "Returns track candidates with session-scoped item keys (use them " +
+          "promptly with enqueue_and_play). Non-expandable items return empty " +
+          "tracks with a skipped reason rather than an error.",
+        inputSchema: {
+          itemKey: z
+            .string()
+            .min(1)
+            .describe("Opaque item key from a recent search_music result."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe("Max tracks to return (default 10)."),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.tracks.getTracksFor(args);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
       "play_now",
       {
         title: "Play an item now in a Roon zone",
@@ -121,6 +157,43 @@ export class RoonMcpServer {
       async (args) => {
         try {
           const result = await this.playback.playNow(args);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "enqueue_and_play",
+      {
+        title: "Build and start a curated Roon queue",
+        description:
+          "Build an ad-hoc queue from an ordered list of curated item keys and " +
+          "start playback in the given zone. The first playable item starts " +
+          "immediately; the rest are appended in order. Pass a zoneId (zone or " +
+          "output id) and itemKeys from recent get_tracks_for/search_music " +
+          "results (use them promptly — they are session-scoped). Optionally " +
+          "shuffle. Returns a PlaybackResult with queued/skipped counts so you " +
+          "can backfill skipped items.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .describe("Target zone id or output id (from list_zones)."),
+          itemKeys: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe("Ordered item keys to queue (from get_tracks_for/search_music)."),
+          shuffle: z
+            .boolean()
+            .optional()
+            .describe("Shuffle the queue; omit to leave the zone's setting unchanged."),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.playback.enqueueAndPlay(args);
           return structured(result);
         } catch (err) {
           return toToolError(err);

@@ -4,6 +4,7 @@ import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { RoonMcpServer } from "./RoonMcpServer.js";
 import { SearchService } from "./SearchService.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
 
 // node-roon-api logs discovery chatter via console.log. On a stdio MCP server
@@ -19,8 +20,9 @@ async function main(): Promise<void> {
   const zones = new ZoneService(roon);
   const browse = new BrowseSessionManager(roon);
   const search = new SearchService(browse);
+  const tracks = new TrackExpansionService(browse);
   const playback = new PlaybackService(browse, zones, roon);
-  const server = new RoonMcpServer(roon, zones, search, playback);
+  const server = new RoonMcpServer(roon, zones, search, tracks, playback);
 
   const shutdown = () => {
     void server.stop().finally(() => process.exit(0));
