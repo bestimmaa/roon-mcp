@@ -164,10 +164,26 @@ declare module "node-roon-api-transport" {
     zones: RoonApiZone[];
   }
 
+  export interface RoonZoneSettings {
+    shuffle?: boolean;
+    auto_radio?: boolean;
+    loop?: "loop" | "loop_one" | "disabled";
+  }
+
   export class RoonApiTransport {
     get_zones(cb: (error: string | false, body: GetZonesBody) => void): void;
     subscribe_zones(
       cb: (response: string, body: unknown) => void,
+    ): void;
+    /**
+     * Change zone playback settings. Marked optional because availability
+     * depends on the installed node-roon-api-transport version; callers must
+     * feature-detect before use.
+     */
+    change_settings?(
+      zoneOrOutputId: string,
+      settings: RoonZoneSettings,
+      cb?: (error: string | false) => void,
     ): void;
   }
 

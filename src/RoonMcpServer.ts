@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 import { ZoneService } from "./ZoneService.js";
@@ -28,6 +29,7 @@ export class RoonMcpServer {
     private readonly roon: RoonClient,
     private readonly zones: ZoneService,
     private readonly search: SearchService,
+    private readonly playback: PlaybackService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -85,6 +87,40 @@ export class RoonMcpServer {
       async (args) => {
         try {
           const result = await this.search.searchMusic(args);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "play_now",
+      {
+        title: "Play an item now in a Roon zone",
+        description:
+          "Immediately play a single search candidate in the given zone. Pass a " +
+          "zoneId (a zone id or output id from list_zones) and an itemKey from a " +
+          "recent search_music result. Item keys are session-scoped, so use a " +
+          "fresh one. Optionally shuffle. Returns a PlaybackResult.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .describe("Target zone id or output id (from list_zones)."),
+          itemKey: z
+            .string()
+            .min(1)
+            .describe("Opaque item key from a recent search_music result."),
+          shuffle: z
+            .boolean()
+            .optional()
+            .describe("Shuffle the selection when starting playback."),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.playback.playNow(args);
           return structured(result);
         } catch (err) {
           return toToolError(err);

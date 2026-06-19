@@ -43,6 +43,25 @@ export interface SearchMusicOutput {
   message?: string;
 }
 
+export interface PlayNowInput {
+  /** Zone id or any of its output ids (from `list_zones`). */
+  zoneId: string;
+  /** Opaque, session-scoped item key from a recent `search_music` result. */
+  itemKey: string;
+  shuffle?: boolean;
+}
+
+export interface PlaybackResult {
+  ok: boolean;
+  zoneId: string;
+  /** Items started/queued by this call. `play_now` queues exactly one. */
+  queued: number;
+  skipped: Array<{ itemKey: string; reason: string }>;
+  /** Best-effort "now playing" line read just after the action; may be stale. */
+  nowPlaying?: string;
+  message?: string;
+}
+
 export type RoonMcpErrorCode =
   | "NO_CORE_PAIRED"
   | "ZONE_NOT_FOUND"

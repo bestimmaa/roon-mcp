@@ -17,7 +17,12 @@ Built on the official Roon Extension API (`node-roon-api` + `node-roon-api-trans
 - [x] `search_music()` with type filtering and broadening
 - [x] Candidate ranking by title relevance + type
 
-Later milestones add single-item playback, track expansion, and curated queues — see the implementation plan.
+**Milestone 3 — single-item playback** ✅
+- [x] Action discovery (find a Play Now / Shuffle action, incl. nested action lists)
+- [x] `play_now()` against a zone or output id
+- [x] Shuffle via a Shuffle action, with a best-effort Transport `change_settings` fallback
+
+Later milestones add track expansion and curated queues — see the implementation plan.
 
 ## Setup
 
@@ -55,6 +60,7 @@ protocol.
 | --- | --- |
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
 | `search_music({ query, type?, limit? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). |
+| `play_now({ zoneId, itemKey, shuffle? })` | Immediately play one search candidate in a zone/output; optional shuffle. |
 
 ## Develop
 

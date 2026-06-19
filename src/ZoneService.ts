@@ -41,10 +41,41 @@ export class ZoneService {
 
   /** List all playable zones exposed by the paired Core. */
   async listZones(): Promise<RoonZone[]> {
+    const body = await this.getZonesBody();
+    return (body.zones ?? []).map(toRoonZone);
+  }
+
+  /**
+   * Find a zone by its zone id or by any of its output ids. Roon playback
+   * actions accept either, so callers can pass whichever `list_zones` exposed.
+   */
+  async findZone(idOrOutput: string): Promise<RoonZone | undefined> {
+    const raw = await this.findRawZone(idOrOutput);
+    return raw ? toRoonZone(raw) : undefined;
+  }
+
+  /** Best-effort "now playing" one-liner for a zone or output id. */
+  async nowPlayingFor(idOrOutput: string): Promise<string | undefined> {
+    const np = (await this.findRawZone(idOrOutput))?.now_playing;
+    return (
+      np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1 ?? undefined
+    );
+  }
+
+  private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
+    const body = await this.getZonesBody();
+    return (body.zones ?? []).find(
+      (z) =>
+        z.zone_id === idOrOutput ||
+        (z.outputs ?? []).some((o) => o.output_id === idOrOutput),
+    );
+  }
+
+  private async getZonesBody(): Promise<GetZonesBody> {
     await this.roon.waitForCore();
     const transport = this.roon.getTransport();
 
-    const body = await new Promise<GetZonesBody>((resolve, reject) => {
+    return new Promise<GetZonesBody>((resolve, reject) => {
       transport.get_zones((error, result) => {
         if (error) {
           reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${error}`));
@@ -53,8 +84,6 @@ export class ZoneService {
         resolve(result);
       });
     });
-
-    return (body.zones ?? []).map(toRoonZone);
   }
 
   /**
