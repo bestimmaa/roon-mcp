@@ -191,6 +191,17 @@ test("an unknown zone id is rejected with ZONE_NOT_FOUND", async () => {
   );
 });
 
+test("play_now without a zoneId resolves the only available zone", async () => {
+  const { svc, browse } = build(
+    { "album:1": [action("Play Now", "act:play")] },
+    ["act:play"],
+  );
+  const out = await svc.playNow({ itemKey: "album:1" });
+  assert.equal(out.ok, true);
+  assert.equal(out.zoneId, "z1");
+  assert.equal(browse.invocations[0]?.zone, "z1");
+});
+
 test("an output id is accepted as the playback target", async () => {
   const { svc, browse } = build(
     { "album:1": [action("Play Now", "act:play")] },

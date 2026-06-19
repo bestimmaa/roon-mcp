@@ -17,7 +17,7 @@ function zone(partial: Partial<RoonApiZone> & { zone_id: string }): RoonApiZone 
 }
 
 /** Builds a ZoneService backed by a stub RoonClient returning the given zones. */
-function serviceWith(zones: RoonApiZone[]): ZoneService {
+function serviceWith(zones: RoonApiZone[], defaultZone?: string): ZoneService {
   const stub = {
     waitForCore: async () => undefined,
     getTransport: () => ({
@@ -25,7 +25,7 @@ function serviceWith(zones: RoonApiZone[]): ZoneService {
       subscribe_zones: () => {},
     }),
   } as unknown as RoonClient;
-  return new ZoneService(stub);
+  return new ZoneService(stub, undefined, defaultZone);
 }
 
 test("listZones maps Roon zones to the public shape", async () => {
@@ -85,4 +85,57 @@ test("resolveZone prefers the currently playing zone when no name match", async 
 test("resolveZone throws ZONE_NOT_FOUND when there are no zones", async () => {
   const svc = serviceWith([]);
   await assert.rejects(svc.resolveZone(), (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND");
+});
+
+test("resolveTarget passes an explicit id through unchanged (output id preserved)", async () => {
+  const svc = serviceWith([
+    zone({ zone_id: "z1", display_name: "Office" }),
+    zone({ zone_id: "z2", display_name: "Kitchen" }),
+  ]);
+  const out = await svc.resolveTarget("o:z2");
+  assert.equal(out.targetId, "o:z2"); // caller's output id, not the zone id
+  assert.equal(out.zone.zoneId, "z2");
+});
+
+test("resolveTarget rejects an unknown explicit id with ZONE_NOT_FOUND", async () => {
+  const svc = serviceWith([zone({ zone_id: "z1", display_name: "Office" })]);
+  await assert.rejects(
+    svc.resolveTarget("nope"),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
+  );
+});
+
+test("resolveTarget uses the configured default zone (by name) when none is passed", async () => {
+  const svc = serviceWith(
+    [zone({ zone_id: "z1", display_name: "Kitchen" }), zone({ zone_id: "z2", display_name: "Office" })],
+    "Office",
+  );
+  const out = await svc.resolveTarget();
+  assert.equal(out.targetId, "z2");
+});
+
+test("resolveTarget honours a default given as a zone id", async () => {
+  const svc = serviceWith(
+    [zone({ zone_id: "z1", display_name: "Kitchen" }), zone({ zone_id: "z2", display_name: "Office" })],
+    "z1",
+  );
+  const out = await svc.resolveTarget();
+  assert.equal(out.targetId, "z1");
+});
+
+test("resolveTarget falls back to the single zone when no default is set", async () => {
+  const svc = serviceWith([zone({ zone_id: "z1", display_name: "Kitchen" })]);
+  const out = await svc.resolveTarget();
+  assert.equal(out.targetId, "z1");
+});
+
+test("resolveTarget throws ZONE_AMBIGUOUS when no default and several zones", async () => {
+  const svc = serviceWith([
+    zone({ zone_id: "z1", display_name: "Kitchen", state: "stopped" }),
+    zone({ zone_id: "z2", display_name: "Bedroom", state: "stopped" }),
+  ]);
+  await assert.rejects(
+    svc.resolveTarget(),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_AMBIGUOUS",
+  );
 });

@@ -13,6 +13,13 @@ export interface ZoneResolutionAmbiguous {
   candidates: RoonZone[];
 }
 
+export interface ResolvedZoneTarget {
+  /** Id to pass to Roon browse actions — the caller's id (which may be an
+   * output id) when explicit, else the resolved zone's id. */
+  targetId: string;
+  zone: RoonZone;
+}
+
 function mapState(state: RoonZoneState | undefined): ZoneState {
   switch (state) {
     case "playing":
@@ -41,6 +48,9 @@ export class ZoneService {
   constructor(
     private readonly roon: RoonClient,
     private readonly logger: RoonCallLogger = silentLogger,
+    /** Optional configured default (zone/output id or display-name substring),
+     * used when a playback call omits its zoneId. */
+    private readonly defaultZone?: string,
   ) {}
 
   /** List all playable zones exposed by the paired Core. */
@@ -56,6 +66,46 @@ export class ZoneService {
   async findZone(idOrOutput: string): Promise<RoonZone | undefined> {
     const raw = await this.findRawZone(idOrOutput);
     return raw ? toRoonZone(raw) : undefined;
+  }
+
+  /**
+   * Resolve the zone a playback call should target.
+   * - Explicit id (zone or output): used as-is; unknown id → `ZONE_NOT_FOUND`.
+   * - Omitted: fall back to the configured default (matched as an id first,
+   *   then as a display name), else the single/Office/playing heuristics.
+   * Returns `ZONE_AMBIGUOUS` when no single zone can be chosen.
+   */
+  async resolveTarget(explicitId?: string): Promise<ResolvedZoneTarget> {
+    if (explicitId) {
+      const zone = await this.findZone(explicitId);
+      if (!zone) {
+        throw new RoonMcpError(
+          "ZONE_NOT_FOUND",
+          `No zone or output matches id "${explicitId}". Call list_zones for current ids.`,
+        );
+      }
+      // Preserve the caller's id (it may be an output id) as the action target.
+      return { targetId: explicitId, zone };
+    }
+
+    // A configured default may be a zone/output id…
+    if (this.defaultZone) {
+      const byId = await this.findZone(this.defaultZone);
+      if (byId) return { targetId: byId.zoneId, zone: byId };
+    }
+
+    // …or a display name; otherwise apply the resolution heuristics.
+    const resolved = await this.resolveZone(this.defaultZone);
+    if ("ambiguous" in resolved) {
+      throw new RoonMcpError(
+        "ZONE_AMBIGUOUS",
+        this.defaultZone
+          ? `Default zone "${this.defaultZone}" matches multiple zones; pass an explicit zoneId.`
+          : "Multiple zones available; set ROON_DEFAULT_ZONE or pass an explicit zoneId.",
+        { candidates: resolved.candidates.map((z) => ({ zoneId: z.zoneId, displayName: z.displayName })) },
+      );
+    }
+    return { targetId: resolved.zoneId, zone: resolved };
   }
 
   /** Best-effort "now playing" one-liner for a zone or output id. */

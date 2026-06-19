@@ -43,6 +43,20 @@ omit `save_playlist` from v1. Curated playback is delivered by `enqueue_and_play
 persistence API. Revisit only if a supported browse-action path to save a queue is
 found on a live Core.
 
+### v1 assumptions
+
+Decisions that shape the current contract (see the implementation plan for context):
+
+- **Core language: English.** Category/action label matching (`Artists`, `Play Now`,
+  `Top Tracks`, …) assumes an English Core. A non-English Core needs locale-aware maps.
+- **Sources: local library + TIDAL.** What searches surface (artist *Top Tracks*,
+  genres, playlists) reflects this; results differ on a local-only Core.
+- **Zone targeting: configurable default.** `zoneId` is optional; see `ROON_DEFAULT_ZONE`.
+- **Queue: replace.** `enqueue_and_play` starts a fresh queue (Play Now + append),
+  rather than adding to whatever is already playing.
+- **Curation: agent-side.** Dedupe / cap-per-artist / ordering / trimming stay in the
+  agent; the server has no `CurationService`.
+
 ## Setup
 
 ```bash
@@ -68,10 +82,20 @@ protocol.
 ```json
 {
   "mcpServers": {
-    "roon": { "command": "node", "args": ["/absolute/path/to/roon-mcp/dist/index.js"] }
+    "roon": {
+      "command": "node",
+      "args": ["/absolute/path/to/roon-mcp/dist/index.js"],
+      "env": { "ROON_DEFAULT_ZONE": "Office" }
+    }
   }
 }
 ```
+
+`ROON_DEFAULT_ZONE` (optional) configures the fallback target — a zone/output id
+or a display-name substring — used when `play_now` / `enqueue_and_play` are called
+without a `zoneId`. If unset, the server falls back to the only zone, an `Office`
+zone, or the currently-playing zone; if it still can't decide it returns
+`ZONE_AMBIGUOUS` so the agent can ask.
 
 ## Tools
 
@@ -80,8 +104,8 @@ protocol.
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
 | `search_music({ query, type?, limit? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). |
 | `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
-| `play_now({ zoneId, itemKey, shuffle? })` | Immediately play one search candidate in a zone/output; optional shuffle. |
-| `enqueue_and_play({ zoneId, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it; reports queued/skipped. |
+| `play_now({ zoneId?, itemKey, shuffle? })` | Immediately play one search candidate; `zoneId` optional (defaults as above). |
+| `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
 
 ## Logging
 

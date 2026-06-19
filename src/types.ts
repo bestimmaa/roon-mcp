@@ -65,16 +65,20 @@ export interface GetTracksForOutput {
 }
 
 export interface PlayNowInput {
-  /** Zone id or any of its output ids (from `list_zones`). */
-  zoneId: string;
+  /**
+   * Zone id or any of its output ids (from `list_zones`). Optional: when
+   * omitted the server falls back to the configured default zone
+   * (`ROON_DEFAULT_ZONE`), then to the single/Office/playing heuristics.
+   */
+  zoneId?: string;
   /** Opaque, session-scoped item key from a recent `search_music` result. */
   itemKey: string;
   shuffle?: boolean;
 }
 
 export interface EnqueueAndPlayInput {
-  /** Zone id or any of its output ids (from `list_zones`). */
-  zoneId: string;
+  /** Zone id or output id (from `list_zones`); see `PlayNowInput.zoneId`. */
+  zoneId?: string;
   /** Ordered, session-scoped item keys (e.g. from `get_tracks_for`). */
   itemKeys: string[];
   shuffle?: boolean;

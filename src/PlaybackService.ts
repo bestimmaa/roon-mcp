@@ -68,29 +68,24 @@ export class PlaybackService {
     private readonly logger: RoonCallLogger = silentLogger,
   ) {}
 
-  /** Start a single search candidate playing immediately in the given zone. */
+  /** Start a single search candidate playing immediately in the target zone. */
   async playNow(input: PlayNowInput): Promise<PlaybackResult> {
     const shuffle = input.shuffle ?? false;
 
-    // Validate the target up front so a stale zone id fails clearly, not as a
-    // confusing browse-action error.
-    const zone = await this.zones.findZone(input.zoneId);
-    if (!zone) {
-      throw new RoonMcpError(
-        "ZONE_NOT_FOUND",
-        `No zone or output matches id "${input.zoneId}". Call list_zones for current ids.`,
-      );
-    }
+    // Resolve the target up front (explicit id, configured default, or
+    // heuristics) so a bad/missing zone fails clearly, not as a confusing
+    // browse-action error.
+    const { targetId } = await this.zones.resolveTarget(input.zoneId);
 
     return this.browse.runExclusive(async () => {
       try {
-        return await this.performPlayNow(input.itemKey, input.zoneId, shuffle);
+        return await this.performPlayNow(input.itemKey, targetId, shuffle);
       } catch (err) {
         // Per plan: if action invocation fails, reopen the item and retry once.
         // (A stale item key surfaces as INVALID_ITEM_KEY and is not retried —
         // re-running performPlayNow with the same key cannot help.)
         if (err instanceof RoonMcpError && err.code === "ACTION_FAILED") {
-          return this.performPlayNow(input.itemKey, input.zoneId, shuffle);
+          return this.performPlayNow(input.itemKey, targetId, shuffle);
         }
         throw err;
       }
@@ -163,19 +158,13 @@ export class PlaybackService {
    * so the agent can backfill, rather than failing the whole call.
    */
   async enqueueAndPlay(input: EnqueueAndPlayInput): Promise<EnqueueAndPlayOutput> {
-    const zone = await this.zones.findZone(input.zoneId);
-    if (!zone) {
-      throw new RoonMcpError(
-        "ZONE_NOT_FOUND",
-        `No zone or output matches id "${input.zoneId}". Call list_zones for current ids.`,
-      );
-    }
+    const { targetId } = await this.zones.resolveTarget(input.zoneId);
 
     const requested = input.itemKeys.length;
     if (requested === 0) {
       return {
         ok: false,
-        zoneId: input.zoneId,
+        zoneId: targetId,
         queued: 0,
         requested: 0,
         skipped: [],
@@ -193,7 +182,7 @@ export class PlaybackService {
       let started = false;
       for (; index < input.itemKeys.length; index++) {
         const key = input.itemKeys[index]!;
-        const outcome = await this.queueOne(key, input.zoneId, PLAY_LABELS);
+        const outcome = await this.queueOne(key, targetId, PLAY_LABELS);
         if (outcome.ok) {
           queued++;
           started = true;
@@ -206,7 +195,7 @@ export class PlaybackService {
       if (!started) {
         return {
           ok: false,
-          zoneId: input.zoneId,
+          zoneId: targetId,
           queued: 0,
           requested,
           skipped,
@@ -217,7 +206,7 @@ export class PlaybackService {
       // 2. Append the remaining items in order.
       for (; index < input.itemKeys.length; index++) {
         const key = input.itemKeys[index]!;
-        const outcome = await this.queueOne(key, input.zoneId, QUEUE_LABELS);
+        const outcome = await this.queueOne(key, targetId, QUEUE_LABELS);
         if (outcome.ok) queued++;
         else skipped.push({ itemKey: key, reason: outcome.reason });
       }
@@ -226,19 +215,19 @@ export class PlaybackService {
       //    setting untouched otherwise). Best-effort via Transport.
       let shuffleNote: string | undefined;
       if (input.shuffle !== undefined) {
-        const applied = await this.trySetShuffle(input.zoneId, input.shuffle);
+        const applied = await this.trySetShuffle(targetId, input.shuffle);
         if (!applied) {
           shuffleNote = ` Shuffle ${input.shuffle ? "on" : "off"} could not be applied (Transport setting unavailable).`;
         }
       }
 
-      const nowPlaying = await this.zones.nowPlayingFor(input.zoneId).catch(() => undefined);
+      const nowPlaying = await this.zones.nowPlayingFor(targetId).catch(() => undefined);
       const message =
         `Queued ${queued} of ${requested} item(s)` +
         (skipped.length > 0 ? `, skipped ${skipped.length}.` : ".") +
         (shuffleNote ?? "");
 
-      return { ok: queued > 0, zoneId: input.zoneId, queued, requested, skipped, nowPlaying, message };
+      return { ok: queued > 0, zoneId: targetId, queued, requested, skipped, nowPlaying, message };
     });
   }
 

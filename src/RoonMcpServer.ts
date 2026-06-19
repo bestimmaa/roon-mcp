@@ -135,15 +135,18 @@ export class RoonMcpServer {
       {
         title: "Play an item now in a Roon zone",
         description:
-          "Immediately play a single search candidate in the given zone. Pass a " +
-          "zoneId (a zone id or output id from list_zones) and an itemKey from a " +
-          "recent search_music result. Item keys are session-scoped, so use a " +
-          "fresh one. Optionally shuffle. Returns a PlaybackResult.",
+          "Immediately play a single search candidate in the target zone. Pass an " +
+          "itemKey from a recent search_music result (item keys are session-scoped, " +
+          "so use a fresh one). zoneId is optional: omit it to use the configured " +
+          "default zone (ROON_DEFAULT_ZONE) or the single/Office/playing fallback; " +
+          "an ambiguous result returns ZONE_AMBIGUOUS so you can ask. Optionally " +
+          "shuffle. Returns a PlaybackResult.",
         inputSchema: {
           zoneId: z
             .string()
             .min(1)
-            .describe("Target zone id or output id (from list_zones)."),
+            .optional()
+            .describe("Target zone id or output id (from list_zones). Omit to use the default zone."),
           itemKey: z
             .string()
             .min(1)
@@ -170,17 +173,19 @@ export class RoonMcpServer {
         title: "Build and start a curated Roon queue",
         description:
           "Build an ad-hoc queue from an ordered list of curated item keys and " +
-          "start playback in the given zone. The first playable item starts " +
-          "immediately; the rest are appended in order. Pass a zoneId (zone or " +
-          "output id) and itemKeys from recent get_tracks_for/search_music " +
-          "results (use them promptly — they are session-scoped). Optionally " +
-          "shuffle. Returns a PlaybackResult with queued/skipped counts so you " +
-          "can backfill skipped items.",
+          "start playback in the target zone. This replaces the zone's current " +
+          "queue: the first playable item starts immediately (Play Now), the rest " +
+          "are appended in order. Pass itemKeys from recent get_tracks_for/" +
+          "search_music results (use them promptly — they are session-scoped). " +
+          "zoneId is optional (omit to use the default zone; see play_now). " +
+          "Optionally shuffle. Returns a PlaybackResult with queued/skipped counts " +
+          "so you can backfill skipped items.",
         inputSchema: {
           zoneId: z
             .string()
             .min(1)
-            .describe("Target zone id or output id (from list_zones)."),
+            .optional()
+            .describe("Target zone id or output id (from list_zones). Omit to use the default zone."),
           itemKeys: z
             .array(z.string().min(1))
             .min(1)

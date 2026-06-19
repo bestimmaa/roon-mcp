@@ -21,7 +21,10 @@ async function main(): Promise<void> {
   // stderr so stdout stays reserved for the MCP JSON-RPC stream.
   const logger = createStderrLogger();
   const roon = new RoonClient();
-  const zones = new ZoneService(roon, logger);
+  // Optional configured default zone (a zone/output id or display-name) used
+  // when a playback call omits its zoneId.
+  const defaultZone = process.env.ROON_DEFAULT_ZONE?.trim() || undefined;
+  const zones = new ZoneService(roon, logger, defaultZone);
   const browse = new BrowseSessionManager(roon, logger);
   const search = new SearchService(browse);
   const tracks = new TrackExpansionService(browse);
