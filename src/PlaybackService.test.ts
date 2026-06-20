@@ -11,8 +11,10 @@ import type {
 import type { GetZonesBody, RoonApiZone } from "node-roon-api-transport";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { encodeLocator } from "./locator.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 import { RoonMcpError } from "./types.js";
 import { ZoneService } from "./ZoneService.js";
 
@@ -23,15 +25,30 @@ interface PlayOpts {
   failActionTimes?: number;
 }
 
-/** Minimal stateful model of the play drill: drill into keys, invoke actions. */
+/** Locator for a single-group/single-item search keyed by `query`. */
+const loc = (query: string) => encodeLocator({ q: query, g: 0, i: 0 });
+
+// Synthetic keys for the canned search tree the navigator walks:
+// search(input) → [group] → [item] → opened content (items[query]).
+const GROUP_KEY = "__grp";
+const ITEM_KEY = "__itm";
+
+/**
+ * Minimal stateful model of the search hierarchy the playback navigator walks.
+ * `items` maps a search query to the *opened item* content (its action menu or
+ * a terminal message); `drills` holds secondary keys (e.g. an action_list
+ * container); invoking an action key records an invocation.
+ */
 class FakeBrowse {
   private stack: BrowseItem[][] = [];
+  private query = "";
   readonly invocations: Array<{ itemKey: string; zone?: string }> = [];
   private failActionRemaining: number;
 
   constructor(
-    private readonly drills: Record<string, DrillResult>,
+    private readonly items: Record<string, DrillResult>,
     private readonly actionKeys: Set<string>,
+    private readonly drills: Record<string, DrillResult> = {},
     opts: PlayOpts = {},
   ) {
     this.failActionRemaining = opts.failActionTimes ?? 0;
@@ -40,6 +57,10 @@ class FakeBrowse {
   browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
     if (o.pop_all) {
       this.stack = [];
+      if (o.input !== undefined) {
+        this.query = o.input;
+        this.stack = [[{ title: "Group", item_key: GROUP_KEY, hint: "list" }]];
+      }
       return cb(false, { action: "list" });
     }
     if (o.pop_levels) {
@@ -47,25 +68,39 @@ class FakeBrowse {
       return cb(false, { action: "list" });
     }
     if (o.item_key !== undefined) {
-      if (this.actionKeys.has(o.item_key)) {
+      const key = o.item_key;
+
+      if (this.actionKeys.has(key)) {
         if (this.failActionRemaining > 0) {
           this.failActionRemaining--;
           return cb(false, { action: "message", is_error: true, message: "ActionFailed" });
         }
-        this.invocations.push({ itemKey: o.item_key, zone: o.zone_or_output_id });
+        this.invocations.push({ itemKey: key, zone: o.zone_or_output_id });
         return cb(false, { action: "none" });
       }
-      const target = this.drills[o.item_key];
-      if (target === undefined) {
-        return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
-      }
-      if (Array.isArray(target)) {
-        this.stack.push(target);
+
+      if (key === GROUP_KEY) {
+        this.stack.push([{ title: "Item", item_key: ITEM_KEY, hint: "list" }]);
         return cb(false, { action: "list" });
       }
-      return cb(false, { action: "message", message: target.message });
+      if (key === ITEM_KEY) {
+        return this.land(this.items[this.query], cb);
+      }
+      return this.land(this.drills[key], cb);
     }
     return cb(false, { action: "none" });
+  }
+
+  /** Push a child list, surface a terminal message, or reject an unknown key. */
+  private land(target: DrillResult | undefined, cb: (e: string | false, b: BrowseResultBody) => void) {
+    if (target === undefined) {
+      return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
+    }
+    if (Array.isArray(target)) {
+      this.stack.push(target);
+      return cb(false, { action: "list", item: { title: this.query } as BrowseItem });
+    }
+    return cb(false, { action: "message", message: target.message });
   }
 
   load(_o: LoadOptions, cb: (e: string | false, b: LoadResultBody) => void): void {
@@ -112,29 +147,31 @@ function action(title: string, key: string): BrowseItem {
 }
 
 function build(
-  drills: Record<string, DrillResult>,
+  items: Record<string, DrillResult>,
   actionKeys: string[],
-  opts: { transport?: FakeTransport; playOpts?: PlayOpts } = {},
+  opts: { transport?: FakeTransport; playOpts?: PlayOpts; drills?: Record<string, DrillResult> } = {},
 ) {
-  const browse = new FakeBrowse(drills, new Set(actionKeys), opts.playOpts);
+  const browse = new FakeBrowse(items, new Set(actionKeys), opts.drills ?? {}, opts.playOpts);
   const transport = opts.transport ?? new FakeTransport([ZONE]);
   const stub = {
     waitForCore: async () => undefined,
     getBrowse: () => browse,
     getTransport: () => transport,
   } as unknown as RoonClient;
+  const mgr = new BrowseSessionManager(stub);
   const zones = new ZoneService(stub);
-  const svc = new PlaybackService(new BrowseSessionManager(stub), zones, stub);
+  const tracks = new TrackExpansionService(mgr);
+  const svc = new PlaybackService(mgr, zones, stub, tracks);
   return { svc, browse, transport };
 }
 
 test("play_now discovers and invokes the Play Now action against the zone", async () => {
   const { svc, browse } = build(
-    { "album:1": [action("Play Now", "act:play"), action("Queue", "act:queue")] },
+    { album: [action("Play Now", "act:play"), action("Queue", "act:queue")] },
     ["act:play", "act:queue"],
   );
 
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1" });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
 
   assert.equal(out.ok, true);
   assert.equal(out.queued, 1);
@@ -145,11 +182,11 @@ test("play_now discovers and invokes the Play Now action against the zone", asyn
 
 test("shuffle prefers a Shuffle action over Play Now and skips the Transport fallback", async () => {
   const { svc, browse, transport } = build(
-    { "album:1": [action("Play Now", "act:play"), action("Shuffle", "act:shuffle")] },
+    { album: [action("Play Now", "act:play"), action("Shuffle", "act:shuffle")] },
     ["act:play", "act:shuffle"],
   );
 
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1", shuffle: true });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album"), shuffle: true });
 
   assert.equal(browse.invocations[0]?.itemKey, "act:shuffle");
   assert.deepEqual(transport.shuffleCalls, []);
@@ -157,12 +194,9 @@ test("shuffle prefers a Shuffle action over Play Now and skips the Transport fal
 });
 
 test("shuffle falls back to the Transport setting when no shuffle action exists", async () => {
-  const { svc, browse, transport } = build(
-    { "album:1": [action("Play Now", "act:play")] },
-    ["act:play"],
-  );
+  const { svc, browse, transport } = build({ album: [action("Play Now", "act:play")] }, ["act:play"]);
 
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1", shuffle: true });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album"), shuffle: true });
 
   assert.equal(browse.invocations[0]?.itemKey, "act:play");
   assert.deepEqual(transport.shuffleCalls, [{ zone: "z1", shuffle: true }]);
@@ -171,62 +205,57 @@ test("shuffle falls back to the Transport setting when no shuffle action exists"
 
 test("shuffle reports when it cannot be applied (no action, Transport unsupported)", async () => {
   const transport = new FakeTransport([ZONE], false);
-  const { svc } = build(
-    { "album:1": [action("Play Now", "act:play")] },
-    ["act:play"],
-    { transport },
-  );
+  const { svc } = build({ album: [action("Play Now", "act:play")] }, ["act:play"], { transport });
 
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1", shuffle: true });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album"), shuffle: true });
 
   assert.equal(out.ok, true);
   assert.match(out.message ?? "", /could not be applied/i);
 });
 
 test("an unknown zone id is rejected with ZONE_NOT_FOUND", async () => {
-  const { svc } = build({ "album:1": [action("Play Now", "act:play")] }, ["act:play"]);
+  const { svc } = build({ album: [action("Play Now", "act:play")] }, ["act:play"]);
   await assert.rejects(
-    svc.playNow({ zoneId: "nope", itemKey: "album:1" }),
+    svc.playNow({ zoneId: "nope", itemKey: loc("album") }),
     (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
   );
 });
 
 test("play_now without a zoneId resolves the only available zone", async () => {
-  const { svc, browse } = build(
-    { "album:1": [action("Play Now", "act:play")] },
-    ["act:play"],
-  );
-  const out = await svc.playNow({ itemKey: "album:1" });
+  const { svc, browse } = build({ album: [action("Play Now", "act:play")] }, ["act:play"]);
+  const out = await svc.playNow({ itemKey: loc("album") });
   assert.equal(out.ok, true);
   assert.equal(out.zoneId, "z1");
   assert.equal(browse.invocations[0]?.zone, "z1");
 });
 
 test("an output id is accepted as the playback target", async () => {
-  const { svc, browse } = build(
-    { "album:1": [action("Play Now", "act:play")] },
-    ["act:play"],
-  );
-  const out = await svc.playNow({ zoneId: "o1", itemKey: "album:1" });
+  const { svc, browse } = build({ album: [action("Play Now", "act:play")] }, ["act:play"]);
+  const out = await svc.playNow({ zoneId: "o1", itemKey: loc("album") });
   assert.equal(out.ok, true);
   assert.equal(browse.invocations[0]?.zone, "o1");
 });
 
-test("an item with no play action yields NO_PLAY_ACTION", async () => {
-  const { svc } = build(
-    { "album:1": [{ title: "Tracks", item_key: "x", hint: "list" }] },
-    [],
-  );
+test("a non-locator itemKey is rejected with INVALID_ITEM_KEY", async () => {
+  const { svc } = build({ album: [action("Play Now", "act:play")] }, ["act:play"]);
   await assert.rejects(
-    svc.playNow({ zoneId: "z1", itemKey: "album:1" }),
+    svc.playNow({ zoneId: "z1", itemKey: "raw-key" }),
+    (e) => e instanceof RoonMcpError && e.code === "INVALID_ITEM_KEY",
+  );
+});
+
+test("an item with no play action yields NO_PLAY_ACTION", async () => {
+  const { svc } = build({ album: [{ title: "Tracks", item_key: "x", hint: "list" }] }, []);
+  await assert.rejects(
+    svc.playNow({ zoneId: "z1", itemKey: loc("album") }),
     (e) => e instanceof RoonMcpError && e.code === "NO_PLAY_ACTION",
   );
 });
 
 test("a non-playable item (message action) yields NO_PLAY_ACTION", async () => {
-  const { svc } = build({ "album:1": { message: "Not available." } }, []);
+  const { svc } = build({ album: { message: "Not available." } }, []);
   await assert.rejects(
-    svc.playNow({ zoneId: "z1", itemKey: "album:1" }),
+    svc.playNow({ zoneId: "z1", itemKey: loc("album") }),
     (e) =>
       e instanceof RoonMcpError &&
       e.code === "NO_PLAY_ACTION" &&
@@ -236,24 +265,20 @@ test("a non-playable item (message action) yields NO_PLAY_ACTION", async () => {
 
 test("actions nested under an action_list container are found", async () => {
   const { svc, browse } = build(
-    {
-      "album:1": [{ title: "More", item_key: "al:more", hint: "action_list" }],
-      "al:more": [action("Play Now", "act:play")],
-    },
+    { album: [{ title: "More", item_key: "al:more", hint: "action_list" }] },
     ["act:play"],
+    { drills: { "al:more": [action("Play Now", "act:play")] } },
   );
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1" });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
   assert.equal(out.ok, true);
   assert.equal(browse.invocations[0]?.itemKey, "act:play");
 });
 
 test("a failed action invocation reopens the item and retries once", async () => {
-  const { svc, browse } = build(
-    { "album:1": [action("Play Now", "act:play")] },
-    ["act:play"],
-    { playOpts: { failActionTimes: 1 } },
-  );
-  const out = await svc.playNow({ zoneId: "z1", itemKey: "album:1" });
+  const { svc, browse } = build({ album: [action("Play Now", "act:play")] }, ["act:play"], {
+    playOpts: { failActionTimes: 1 },
+  });
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
   assert.equal(out.ok, true);
   // Only the successful retry is recorded as an invocation.
   assert.deepEqual(browse.invocations, [{ itemKey: "act:play", zone: "z1" }]);
@@ -262,14 +287,17 @@ test("a failed action invocation reopens the item and retries once", async () =>
 test("enqueue starts the first item with Play Now and appends the rest with Queue", async () => {
   const { svc, browse } = build(
     {
-      "t:1": [action("Play Now", "p1"), action("Add to Queue", "q1")],
-      "t:2": [action("Play Now", "p2"), action("Add to Queue", "q2")],
-      "t:3": [action("Play Now", "p3"), action("Add to Queue", "q3")],
+      t1: [action("Play Now", "p1"), action("Add to Queue", "q1")],
+      t2: [action("Play Now", "p2"), action("Add to Queue", "q2")],
+      t3: [action("Play Now", "p3"), action("Add to Queue", "q3")],
     },
     ["p1", "q1", "p2", "q2", "p3", "q3"],
   );
 
-  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "t:2", "t:3"] });
+  const out = await svc.enqueueAndPlay({
+    zoneId: "z1",
+    itemKeys: [loc("t1"), loc("t2"), loc("t3")],
+  });
 
   assert.equal(out.ok, true);
   assert.equal(out.queued, 3);
@@ -285,19 +313,22 @@ test("enqueue starts the first item with Play Now and appends the rest with Queu
 test("enqueue skips a non-playable middle item and queues the rest", async () => {
   const { svc } = build(
     {
-      "t:1": [action("Play Now", "p1")],
+      t1: [action("Play Now", "p1")],
       bad: { message: "Unavailable." },
-      "t:3": [action("Play Now", "p3"), action("Queue", "q3")],
+      t3: [action("Play Now", "p3"), action("Queue", "q3")],
     },
     ["p1", "p3", "q3"],
   );
 
-  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "bad", "t:3"] });
+  const out = await svc.enqueueAndPlay({
+    zoneId: "z1",
+    itemKeys: [loc("t1"), loc("bad"), loc("t3")],
+  });
 
   assert.equal(out.ok, true);
   assert.equal(out.queued, 2);
   assert.equal(out.skipped.length, 1);
-  assert.equal(out.skipped[0]?.itemKey, "bad");
+  assert.equal(out.skipped[0]?.itemKey, loc("bad"));
   assert.match(out.skipped[0]?.reason ?? "", /unavailable/i);
 });
 
@@ -305,17 +336,20 @@ test("enqueue falls through to the next item as the queue starter", async () => 
   const { svc, browse } = build(
     {
       bad: { message: "Nope." },
-      "t:2": [action("Play Now", "p2"), action("Queue", "q2")],
-      "t:3": [action("Play Now", "p3"), action("Queue", "q3")],
+      t2: [action("Play Now", "p2"), action("Queue", "q2")],
+      t3: [action("Play Now", "p3"), action("Queue", "q3")],
     },
     ["p2", "q2", "p3", "q3"],
   );
 
-  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["bad", "t:2", "t:3"] });
+  const out = await svc.enqueueAndPlay({
+    zoneId: "z1",
+    itemKeys: [loc("bad"), loc("t2"), loc("t3")],
+  });
 
   assert.equal(out.ok, true);
   assert.equal(out.queued, 2);
-  assert.equal(out.skipped[0]?.itemKey, "bad");
+  assert.equal(out.skipped[0]?.itemKey, loc("bad"));
   assert.deepEqual(
     browse.invocations.map((i) => i.itemKey),
     ["p2", "q3"],
@@ -323,12 +357,9 @@ test("enqueue falls through to the next item as the queue starter", async () => 
 });
 
 test("enqueue with no startable items reports ok:false and queued 0", async () => {
-  const { svc } = build(
-    { bad1: { message: "No." }, bad2: { message: "No." } },
-    [],
-  );
+  const { svc } = build({ bad1: { message: "No." }, bad2: { message: "No." } }, []);
 
-  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["bad1", "bad2"] });
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("bad1"), loc("bad2")] });
 
   assert.equal(out.ok, false);
   assert.equal(out.queued, 0);
@@ -336,35 +367,35 @@ test("enqueue with no startable items reports ok:false and queued 0", async () =
 });
 
 test("enqueue skips a stale (invalid) item key instead of failing the call", async () => {
-  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"]);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"]);
 
-  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1", "ghost"] });
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1"), loc("ghost")] });
 
   assert.equal(out.ok, true);
   assert.equal(out.queued, 1);
-  assert.equal(out.skipped[0]?.itemKey, "ghost");
+  assert.equal(out.skipped[0]?.itemKey, loc("ghost"));
 });
 
 test("enqueue applies shuffle via Transport only when requested", async () => {
   const transport = new FakeTransport([ZONE]);
-  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"], { transport });
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
 
-  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1"], shuffle: true });
+  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")], shuffle: true });
   assert.deepEqual(transport.shuffleCalls, [{ zone: "z1", shuffle: true }]);
 });
 
 test("enqueue leaves the zone's shuffle setting untouched when shuffle is omitted", async () => {
   const transport = new FakeTransport([ZONE]);
-  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"], { transport });
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
 
-  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: ["t:1"] });
+  await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")] });
   assert.deepEqual(transport.shuffleCalls, []);
 });
 
 test("enqueue rejects an unknown zone id with ZONE_NOT_FOUND", async () => {
-  const { svc } = build({ "t:1": [action("Play Now", "p1")] }, ["p1"]);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"]);
   await assert.rejects(
-    svc.enqueueAndPlay({ zoneId: "nope", itemKeys: ["t:1"] }),
+    svc.enqueueAndPlay({ zoneId: "nope", itemKeys: [loc("t1")] }),
     (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
   );
 });

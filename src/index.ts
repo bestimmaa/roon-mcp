@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const browse = new BrowseSessionManager(roon, logger);
   const search = new SearchService(browse);
   const tracks = new TrackExpansionService(browse);
-  const playback = new PlaybackService(browse, zones, roon, logger);
+  const playback = new PlaybackService(browse, zones, roon, tracks, logger);
   const server = new RoonMcpServer(roon, zones, search, tracks, playback);
 
   const shutdown = () => {

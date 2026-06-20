@@ -14,7 +14,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/",
+    "test": "tsc && node --test \"dist/**/*.test.js\"",
     "test:integration": "tsc && node scripts/integration.mjs"
   },
   "engines": {

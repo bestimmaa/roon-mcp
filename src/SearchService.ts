@@ -1,6 +1,8 @@
 import type { BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { encodeLocator } from "./locator.js";
+import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
 import {
   RoonMcpError,
   type MusicCandidate,
@@ -37,10 +39,6 @@ function groupTitleToType(title: string): MusicItemType {
   return GROUP_TITLE_TO_TYPE[cleaned] ?? "unknown";
 }
 
-function isSelectable(item: BrowseItem): boolean {
-  return Boolean(item.item_key) && item.hint !== "header";
-}
-
 /** Turns a text query into ranked browse candidates via the search hierarchy. */
 export class SearchService {
   constructor(private readonly browse: BrowseSessionManager) {}
@@ -57,11 +55,13 @@ export class SearchService {
     input: SearchMusicInput,
     limit: number,
   ): Promise<SearchMusicOutput> {
-    await this.browse.resetSearchHierarchy();
-
+    // Roon only registers the search when `input` and `pop_all` ride in the
+    // same browse call; submitting `input` after a separate reset yields a
+    // "No Results" placeholder. Keep them together.
     const submitted = await this.browse.browse({
-      hierarchy: "search",
+      hierarchy: SEARCH_HIERARCHY,
       input: input.query,
+      pop_all: true,
     });
     if (submitted.action === "message") {
       return {
@@ -73,7 +73,7 @@ export class SearchService {
     }
 
     const groupsLoad = await this.browse.load({
-      hierarchy: "search",
+      hierarchy: SEARCH_HIERARCHY,
       offset: 0,
       count: GROUP_SCAN_COUNT,
     });
@@ -83,12 +83,22 @@ export class SearchService {
     }
 
     let broadened = false;
-    let candidates = await this.collectFromGroups(this.selectGroups(groups, input.type), limit);
+    let candidates = await this.collectFromGroups(
+      input.query,
+      groups,
+      this.selectGroupIndices(groups, input.type),
+      limit,
+    );
 
     // If a typed search came back empty, broaden to all categories.
     if (candidates.length === 0 && input.type) {
       broadened = true;
-      candidates = await this.collectFromGroups(groups, limit);
+      candidates = await this.collectFromGroups(
+        input.query,
+        groups,
+        groups.map((_, idx) => idx),
+        limit,
+      );
     }
 
     const ranked = this.rankCandidates(candidates, input.query, input.type).slice(0, limit);
@@ -103,30 +113,42 @@ export class SearchService {
     return { query: input.query, candidates: ranked, broadened, message };
   }
 
-  private selectGroups(groups: BrowseItem[], type?: MusicItemType): BrowseItem[] {
-    if (!type) return groups;
-    const matching = groups.filter((g) => groupTitleToType(g.title) === type);
-    return matching.length > 0 ? matching : [];
+  /** Indices (into the top-level group list) to scan for the requested type. */
+  private selectGroupIndices(groups: BrowseItem[], type?: MusicItemType): number[] {
+    const all = groups.map((_, idx) => idx);
+    if (!type) return all;
+    return all.filter((idx) => groupTitleToType(groups[idx]!.title) === type);
   }
 
   private async collectFromGroups(
+    query: string,
     groups: BrowseItem[],
+    indices: number[],
     limit: number,
   ): Promise<MusicCandidate[]> {
     const out: MusicCandidate[] = [];
-    for (const group of groups) {
+    for (const g of indices) {
+      const group = groups[g]!;
       const type = groupTitleToType(group.title);
       try {
-        await this.browse.browse({ hierarchy: "search", item_key: group.item_key });
+        const nav = await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: group.item_key });
+        // action:"none" means Roon didn't push a new level (e.g. a "No Results"
+        // placeholder item) — nothing to load and nothing to pop.
+        if (nav.action !== "list") continue;
         const loaded = await this.browse.load({
-          hierarchy: "search",
+          hierarchy: SEARCH_HIERARCHY,
           offset: 0,
           count: limit,
         });
-        for (const item of loaded.items) {
-          if (!isSelectable(item)) continue;
+        // Encode each candidate as a locator (query + group index + item index)
+        // rather than the raw Roon key: the raw key dies when we pop back below,
+        // whereas a locator lets playback re-navigate to a live key later. The
+        // item index is into the *selectable* children so it matches what
+        // SearchNavigator re-derives.
+        const children = loaded.items.filter(isSelectable);
+        children.forEach((item, i) => {
           out.push({
-            itemKey: item.item_key!,
+            itemKey: encodeLocator({ q: query, g, i }),
             title: item.title,
             subtitle: item.subtitle,
             type,
@@ -134,15 +156,14 @@ export class SearchService {
             available: true,
             sourceGroup: group.title,
           });
-        }
+        });
+        // item_keys are level-scoped: pop back to the group list before the
+        // next group so its keys stay valid.
+        await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, pop_levels: 1 });
       } catch (err) {
         // A single bad group shouldn't sink the whole search.
         if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") continue;
         throw err;
-      } finally {
-        // item_keys are level-scoped: pop back to the group list before the
-        // next group so its keys stay valid.
-        await this.browse.browse({ hierarchy: "search", pop_levels: 1 });
       }
     }
     return out;

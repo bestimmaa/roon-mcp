@@ -3,6 +3,8 @@ import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
+import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
 import {
   RoonMcpError,
@@ -12,8 +14,9 @@ import {
   type PlayNowInput,
 } from "./types.js";
 
-// Item keys handed to playback originate from `search_music`, so we drive the
-// playback drill in the same hierarchy that produced them.
+// Item keys handed to playback are `search_music` locators, so we drive the
+// playback drill in the same (search) hierarchy that produced them, by
+// re-navigating to a live key via SearchNavigator.
 const PLAY_HIERARCHY: BrowseHierarchy = "search";
 const LOAD_COUNT = 100;
 
@@ -61,16 +64,22 @@ function pickAction(items: BrowseItem[], labels: string[]): BrowseItem | null {
 
 /** Executes Browse actions that build and start queues. */
 export class PlaybackService {
+  private readonly navigator: SearchNavigator;
+
   constructor(
     private readonly browse: BrowseSessionManager,
     private readonly zones: ZoneService,
     private readonly roon: RoonClient,
+    private readonly tracks: TrackExpansionService,
     private readonly logger: RoonCallLogger = silentLogger,
-  ) {}
+  ) {
+    this.navigator = new SearchNavigator(browse);
+  }
 
   /** Start a single search candidate playing immediately in the target zone. */
   async playNow(input: PlayNowInput): Promise<PlaybackResult> {
     const shuffle = input.shuffle ?? false;
+    const loc = requireLocator(input.itemKey);
 
     // Resolve the target up front (explicit id, configured default, or
     // heuristics) so a bad/missing zone fails clearly, not as a confusing
@@ -79,13 +88,13 @@ export class PlaybackService {
 
     return this.browse.runExclusive(async () => {
       try {
-        return await this.performPlayNow(input.itemKey, targetId, shuffle);
+        return await this.performPlayNow(loc, targetId, shuffle);
       } catch (err) {
         // Per plan: if action invocation fails, reopen the item and retry once.
-        // (A stale item key surfaces as INVALID_ITEM_KEY and is not retried —
-        // re-running performPlayNow with the same key cannot help.)
+        // Re-navigating gives fresh live keys, so the retry is meaningful. (A
+        // stale locator surfaces as INVALID_ITEM_KEY and is not retried.)
         if (err instanceof RoonMcpError && err.code === "ACTION_FAILED") {
-          return this.performPlayNow(input.itemKey, targetId, shuffle);
+          return this.performPlayNow(loc, targetId, shuffle);
         }
         throw err;
       }
@@ -93,12 +102,12 @@ export class PlaybackService {
   }
 
   private async performPlayNow(
-    itemKey: string,
+    loc: Parameters<SearchNavigator["openItem"]>[0],
     zoneId: string,
     shuffle: boolean,
   ): Promise<PlaybackResult> {
-    // 1. Open the item. Item keys are session-scoped; a stale key fails here.
-    const opened = await this.openItem(itemKey);
+    // 1. Re-navigate to a live key for the located item and open it.
+    const opened = await this.navigator.openItem(loc);
     if (opened.action === "message") {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
@@ -232,26 +241,30 @@ export class PlaybackService {
   }
 
   /**
-   * Open one item, find a matching action, and invoke it against the zone.
-   * Always pops back to the level the item key lives on, so the next curated
-   * key still resolves. Per-item Roon failures are returned (not thrown) so the
-   * enqueue loop can skip and continue.
+   * Re-navigate to one located item/track, find a matching action, and invoke
+   * it against the zone. Each call re-navigates from a fresh search (so the keys
+   * are live and no pop bookkeeping is needed); searching does not disturb the
+   * zone's queue being built. Per-item Roon failures are returned (not thrown)
+   * so the enqueue loop can skip and continue.
    */
   private async queueOne(
     itemKey: string,
     zoneId: string,
     labels: string[],
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    let levelsPushed = 0;
     try {
-      const opened = await this.openItem(itemKey);
+      const loc = requireLocator(itemKey);
+      // A track locator (t set) resolves through the track list; an item
+      // locator opens the candidate directly.
+      const opened =
+        loc.t !== undefined
+          ? await this.tracks.openTrackForPlayback(loc)
+          : await this.navigator.openItem(loc);
       if (opened.action === "message") {
         return { ok: false, reason: opened.message ?? "Item is not playable." };
       }
-      if (opened.action === "list") levelsPushed += 1;
 
-      const { action, extraLevelsPushed } = await this.findAction(labels);
-      levelsPushed += extraLevelsPushed;
+      const { action } = await this.findAction(labels);
       if (!action) return { ok: false, reason: "No matching play/queue action." };
 
       const result = await this.browse.browse({
@@ -264,9 +277,9 @@ export class PlaybackService {
       }
       return { ok: true };
     } catch (err) {
-      // A stale key or a transient per-item browse failure shouldn't abort the
-      // whole queue; surface it as a skip reason. Fatal errors (e.g. no Core)
-      // still propagate.
+      // A stale locator or a transient per-item browse failure shouldn't abort
+      // the whole queue; surface it as a skip reason. Fatal errors (e.g. no
+      // Core) still propagate.
       if (
         err instanceof RoonMcpError &&
         (err.code === "INVALID_ITEM_KEY" || err.code === "BROWSE_FAILED")
@@ -274,19 +287,7 @@ export class PlaybackService {
         return { ok: false, reason: err.message };
       }
       throw err;
-    } finally {
-      // Return to the curated item-key level for the next iteration.
-      if (levelsPushed > 0) {
-        await this.browse
-          .browse({ hierarchy: PLAY_HIERARCHY, pop_levels: levelsPushed })
-          .catch(() => undefined);
-      }
     }
-  }
-
-  /** Drill into an item key within the play hierarchy. */
-  private async openItem(itemKey: string) {
-    return this.browse.browse({ hierarchy: PLAY_HIERARCHY, item_key: itemKey });
   }
 
   /**

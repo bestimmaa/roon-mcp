@@ -5,4 +5,6 @@ plan in Notion and `README.md` for scope and milestones.
 
 ## References
 
-- Official Roon API: https://github.com/RoonLabs/node-roon-api
+- This is the Roon API we are using: https://github.com/RoonLabs/node-roon-api
+  (plus the companion service modules `node-roon-api-browse`,
+  `node-roon-api-transport`, and `node-roon-api-status`).
