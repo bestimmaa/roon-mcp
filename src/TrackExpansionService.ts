@@ -20,18 +20,53 @@ const SCAN_COUNT = 100;
 // PLAY_LABELS caveat): non-English Cores need locale-aware matching here.
 const TRACK_SECTION_LABELS = ["top tracks", "tracks", "popular", "songs"];
 
+// Leading "Play …"/"Shuffle" shortcut rows that play a whole album/artist/
+// playlist rather than an individual track. They share the `action_list` hint
+// with real track rows (both open an action menu), so they can't be told apart
+// by hint and are excluded by title instead. English-only — same localization
+// caveat as TRACK_SECTION_LABELS and PlaybackService's PLAY_LABELS.
+const PLAY_ACTION_LABELS = [
+  "play now",
+  "play album",
+  "play artist",
+  "play genre",
+  "play playlist",
+  "play track",
+  "play",
+  "shuffle",
+  "start radio",
+];
+
 function normalize(text: string): string {
   return text.trim().toLowerCase();
 }
 
-/** A selectable, navigable leaf (not a header or action). */
+/** A "Play Album"/"Play Artist"/"Shuffle"-style whole-container action, not a track. */
+function isPlayAction(item: BrowseItem): boolean {
+  return PLAY_ACTION_LABELS.includes(normalize(item.title));
+}
+
+/**
+ * A single playable track. Roon item hints are
+ * `null | action | action_list | list | header`. A track row is either a
+ * generic leaf (`null`) or — more commonly in real Cores — an `action_list`
+ * row that opens its Play/Queue menu when selected. We therefore *include*
+ * `action_list` rows but reject:
+ *   - `"list"` rows, which are sub-lists (albums, "Top Tracks" containers) to
+ *     drill via `findTrackContainer` rather than tracks themselves;
+ *   - `"header"`/`"action"` rows (structural / individual menu actions);
+ *   - leading "Play …"/"Shuffle" shortcut rows, which share the `action_list`
+ *     hint with tracks but play the whole container.
+ */
 function isTrackLeaf(item: BrowseItem): boolean {
-  return (
-    Boolean(item.item_key) &&
-    item.hint !== "header" &&
-    item.hint !== "action" &&
-    item.hint !== "action_list"
-  );
+  if (!item.item_key) return false;
+  if (item.hint === "header" || item.hint === "action" || item.hint === "list") return false;
+  return !isPlayAction(item);
+}
+
+/** A navigable sub-list to drill into (an album, or a "Top Tracks" container). */
+function isContainer(item: BrowseItem): boolean {
+  return Boolean(item.item_key) && item.hint === "list";
 }
 
 /**
@@ -138,10 +173,20 @@ export class TrackExpansionService {
 
   /**
    * Classify an opened item and locate its tracks. Leaves the session at the
-   * track list for the `list` case. Mirrors the three shapes Roon returns:
+   * track list for the `list` case. Mirrors the shapes Roon returns:
    *   A. a single playable track (children are its action menu)
    *   B. tracks directly under the item (album/playlist track list)
-   *   C. tracks one level down a "Top Tracks"-style container (artist page)
+   *   C. tracks one level down a "Top Tracks"-style container (streaming
+   *      artist page), or — for a purely local library with no track section —
+   *      the artist's top album drilled into its own track list.
+   *
+   * For (C) we drill a single container (the labelled track list if present,
+   * else the top album). Returning tracks from just one album keeps the
+   * resolution a single live list, which the {q,g,i,t} locator and
+   * `openTrackForPlayback` rely on: `t` indexes that one ordered list, and
+   * re-resolving re-derives the identical list with live keys. Flattening
+   * across several albums would strand the earlier albums' keys (Roon keys are
+   * level-scoped — see locator.ts) and need a second album index in the scheme.
    */
   private async resolveTracks(opened: BrowseResultBody): Promise<TrackResolution> {
     const loaded = await this.browse.load({
@@ -190,14 +235,19 @@ export class TrackExpansionService {
     return chosen.items.filter(isTrackLeaf);
   }
 
-  /** Find a child to drill into for tracks: a "Top Tracks"-like list, else the first leaf. */
+  /**
+   * Find a sub-list to drill into for tracks: a "Top Tracks"-like container if
+   * one is present, else the top album (first navigable container). Only
+   * containers (`hint: "list"`) qualify — a bare track leaf would yield its
+   * action menu, not a track list.
+   */
   private findTrackContainer(items: BrowseItem[]): BrowseItem | null {
-    const navigable = items.filter(isTrackLeaf);
+    const containers = items.filter(isContainer);
     for (const label of TRACK_SECTION_LABELS) {
-      const hit = navigable.find((c) => normalize(c.title).startsWith(label));
+      const hit = containers.find((c) => normalize(c.title).startsWith(label));
       if (hit) return hit;
     }
-    return navigable[0] ?? null;
+    return containers[0] ?? null;
   }
 }
 

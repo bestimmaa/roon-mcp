@@ -105,6 +105,15 @@ function header(title: string): BrowseItem {
 function action(title: string, key: string): BrowseItem {
   return { title, item_key: key, hint: "action" };
 }
+// A real Roon track row opens its Play/Queue menu when selected, so it carries
+// hint "action_list" (unlike the bare-leaf `track()` model above). The leading
+// "Play Album"/"Play Artist" shortcut shares that hint but is not a track.
+function actionTrack(title: string, key: string, subtitle?: string): BrowseItem {
+  return { title, item_key: key, subtitle, hint: "action_list" };
+}
+function playShortcut(title: string, key: string): BrowseItem {
+  return { title, item_key: key, hint: "action_list" };
+}
 
 test("an album expands directly into its track list", async () => {
   const svc = buildService({
@@ -161,6 +170,90 @@ test("an artist page with a 'Top Tracks' header returns those tracks, not albums
   assert.equal(out.tracks.length, 2);
   assert.deepEqual(out.tracks.map((t) => t.title).sort(), ["Awake", "Montana"]);
   assert.ok(out.tracks.every((t) => t.title !== "Dive"));
+});
+
+test("a local artist with no track section drills its top album into real tracks", async () => {
+  // Purely-local artist page: a flat list of album containers, no streaming
+  // "Top Tracks"/"Popular" section. The album must not be returned as a track;
+  // we drill it into its own track list. (Reproduces the live "Tycho" bug.)
+  const svc = buildService({
+    artist2: { title: "Tycho", items: [nav("Dive (Deluxe Version)", "al:1")] },
+    "al:1": {
+      title: "Dive (Deluxe Version)",
+      items: [track("Awake", "t:1", "Tycho"), track("Daydream", "t:2", "Tycho")],
+    },
+  });
+
+  const out = await svc.getTracksFor({ itemKey: loc("artist2") });
+
+  assert.deepEqual(out.skipped, []);
+  assert.deepEqual(out.tracks.map((t) => t.title), ["Awake", "Daydream"]);
+  assert.ok(out.tracks.every((t) => t.title !== "Dive (Deluxe Version)"));
+  // Tracks are keyed by the artist locator extended with their drilled index.
+  assert.deepEqual(out.tracks.map((t) => decodeLocator(t.itemKey)?.t), [0, 1]);
+  assert.equal(out.tracks[0]?.artist, "Tycho");
+});
+
+test("a local artist drills its album past the leading 'Play' shortcuts (live shape)", async () => {
+  // Mirrors the real Tycho Core: the artist page leads with a "Play Artist"
+  // action_list shortcut + an album (hint "list"); the album leads with a
+  // "Play Album" shortcut + action_list track rows. Only the real track must
+  // come back — neither the album nor the "Play …" shortcuts.
+  const svc = buildService({
+    artist4: {
+      title: "Tycho",
+      items: [playShortcut("Play Artist", "pa:0"), nav("Dive (Deluxe Version)", "al:1")],
+    },
+    "al:1": {
+      title: "Dive (Deluxe Version)",
+      items: [playShortcut("Play Album", "pl:0"), actionTrack("Hours", "tk:1", "Tycho, Zac Brown")],
+    },
+  });
+
+  const out = await svc.getTracksFor({ itemKey: loc("artist4") });
+
+  assert.deepEqual(out.skipped, []);
+  assert.deepEqual(out.tracks.map((t) => t.title), ["Hours"]);
+  assert.ok(out.tracks.every((t) => !/^play /i.test(t.title) && t.title !== "Dive (Deluxe Version)"));
+  assert.equal(out.tracks[0]?.artist, "Tycho, Zac Brown");
+  assert.equal(decodeLocator(out.tracks[0]?.itemKey ?? "")?.t, 0);
+});
+
+test("an artist page with album sections (headers, no track label) drills the top album", async () => {
+  const svc = buildService({
+    artist3: {
+      title: "Tycho",
+      items: [header("Main Albums"), nav("Dive", "al:1"), nav("Awake", "al:2")],
+    },
+    "al:1": { title: "Dive", items: [track("A1", "t:1"), track("A2", "t:2")] },
+    "al:2": { title: "Awake", items: [track("B1", "t:3")] },
+  });
+
+  const out = await svc.getTracksFor({ itemKey: loc("artist3") });
+
+  // The first (top) album is drilled; its tracks come back, not the album names.
+  assert.deepEqual(out.tracks.map((t) => t.title), ["A1", "A2"]);
+  assert.deepEqual(out.skipped, []);
+});
+
+test("a located artist track re-resolves to a live key for playback", async () => {
+  const svc = buildService({
+    artist2: { title: "Tycho", items: [nav("Dive (Deluxe Version)", "al:1")] },
+    "al:1": { title: "Dive (Deluxe Version)", items: [track("Awake", "t:1"), track("Daydream", "t:2")] },
+    // Browsing into a track yields its action menu (the "self" shape).
+    "t:1": { title: "Awake", items: [action("Play Now", "a:p")], listHint: "action_list" },
+    "t:2": { title: "Daydream", items: [action("Play Now", "a:p")], listHint: "action_list" },
+  });
+
+  const out = await svc.getTracksFor({ itemKey: loc("artist2") });
+  const second = decodeLocator(out.tracks[1]?.itemKey ?? "");
+  assert.equal(second?.t, 1);
+
+  // PlaybackService re-navigates a track locator through openTrackForPlayback;
+  // it must re-drill the album and open entry t, landing on that track.
+  const opened = await svc.openTrackForPlayback(second!);
+  assert.equal(opened.action, "list");
+  assert.equal(opened.item?.title, "Daydream");
 });
 
 test("when no direct tracks exist, it drills into a 'Tracks' container", async () => {
