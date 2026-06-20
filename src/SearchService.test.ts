@@ -10,6 +10,7 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { decodeLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 
@@ -36,14 +37,12 @@ class FakeBrowse {
   ) {}
 
   browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
-    if (o.pop_all) {
-      this.stack = [];
-      return cb(false, { action: "list" });
-    }
     if (o.pop_levels) {
       for (let i = 0; i < o.pop_levels; i++) this.stack.pop();
       return cb(false, { action: "list" });
     }
+    // Real Roon takes `input` together with `pop_all` in one call; the input
+    // branch resets the stack itself, so check it before a bare `pop_all`.
     if (o.input !== undefined) {
       this.inputCalls++;
       if (this.opts.failInputTimes && this.inputCalls <= this.opts.failInputTimes) {
@@ -55,6 +54,10 @@ class FakeBrowse {
       this.stack = [
         this.groups.map((g) => ({ title: g.title, item_key: g.key, hint: "list" as const })),
       ];
+      return cb(false, { action: "list" });
+    }
+    if (o.pop_all) {
+      this.stack = [];
       return cb(false, { action: "list" });
     }
     if (o.item_key !== undefined) {
@@ -100,13 +103,19 @@ const GENRES: GroupDef = {
   items: [item("Dark Ambient", "ge:dark")],
 };
 
-test("searchMusic returns ranked candidates and preserves opaque item keys", async () => {
+test("searchMusic returns ranked candidates keyed by re-navigable locators", async () => {
   const svc = buildService([ARTISTS]);
   const out = await svc.searchMusic({ query: "Tycho" });
   assert.equal(out.broadened, false);
-  assert.equal(out.candidates[0]?.itemKey, "a:tycho");
+  assert.equal(out.candidates[0]?.title, "Tycho");
   assert.equal(out.candidates[0]?.type, "artist");
   assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  // The itemKey is a locator carrying the query + group/item indices, not the
+  // raw (ephemeral) Roon key.
+  const decoded = decodeLocator(out.candidates[0]?.itemKey ?? "");
+  assert.equal(decoded?.q, "Tycho");
+  assert.equal(typeof decoded?.g, "number");
+  assert.equal(decoded?.i, 0);
   // Exact title match ranks above the prefix match.
   assert.ok((out.candidates[0]?.score ?? 0) > (out.candidates[1]?.score ?? 0));
 });
@@ -149,12 +158,12 @@ test("a message action yields an empty result without throwing", async () => {
 test("a single failing group is skipped, others still return", async () => {
   const svc = buildService([{ ...ARTISTS, failDrill: true }, GENRES]);
   const out = await svc.searchMusic({ query: "Dark Ambient" });
-  assert.ok(out.candidates.some((c) => c.itemKey === "ge:dark"));
-  assert.ok(out.candidates.every((c) => c.itemKey !== "a:tycho"));
+  assert.ok(out.candidates.some((c) => c.title === "Dark Ambient"));
+  assert.ok(out.candidates.every((c) => c.title !== "Tycho"));
 });
 
 test("an InvalidItemKey on submit triggers one reset-and-retry", async () => {
   const svc = buildService([ARTISTS], { failInputTimes: 1 });
   const out = await svc.searchMusic({ query: "Tycho" });
-  assert.equal(out.candidates[0]?.itemKey, "a:tycho");
+  assert.equal(out.candidates[0]?.title, "Tycho");
 });

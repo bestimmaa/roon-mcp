@@ -10,6 +10,7 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { decodeLocator, encodeLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 
@@ -18,15 +19,34 @@ type Node =
   | { title: string; items: BrowseItem[]; listHint?: "action_list" | null }
   | { title?: string; message: string };
 
-/** Minimal stateful model of Roon's browse drill (levels + a stack). */
+/** Locator for a single-group/single-item search keyed by `query`. */
+const loc = (query: string) => encodeLocator({ q: query, g: 0, i: 0 });
+
+// Synthetic keys for the canned search tree the navigator walks:
+// search(input) → [group] → [item] → opened node (nodes[query]).
+const GROUP_KEY = "__grp";
+const ITEM_KEY = "__itm";
+
+/**
+ * Minimal stateful model of the search hierarchy the expander navigates. The
+ * opened item for a query is `nodes[query]`; secondary containers (e.g. a
+ * "Tracks" sub-list) are keyed by their own item_key, also in `nodes`.
+ */
 class FakeBrowse {
   private stack: Array<{ items: BrowseItem[]; hint?: "action_list" | null; title: string }> = [];
+  private query = "";
 
   constructor(private readonly nodes: Record<string, Node>) {}
 
   browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
     if (o.pop_all) {
       this.stack = [];
+      if (o.input !== undefined) {
+        this.query = o.input;
+        this.stack = [
+          { items: [{ title: "Group", item_key: GROUP_KEY, hint: "list" }], hint: null, title: "Search" },
+        ];
+      }
       return cb(false, { action: "list" });
     }
     if (o.pop_levels) {
@@ -34,7 +54,11 @@ class FakeBrowse {
       return cb(false, { action: "list" });
     }
     if (o.item_key !== undefined) {
-      const node = this.nodes[o.item_key];
+      if (o.item_key === GROUP_KEY) {
+        this.stack.push({ items: [{ title: "Item", item_key: ITEM_KEY, hint: "list" }], hint: null, title: "Group" });
+        return cb(false, { action: "list" });
+      }
+      const node = o.item_key === ITEM_KEY ? this.nodes[this.query] : this.nodes[o.item_key];
       if (node === undefined) {
         return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
       }
@@ -44,7 +68,7 @@ class FakeBrowse {
       this.stack.push({ items: node.items, hint: node.listHint, title: node.title });
       return cb(false, {
         action: "list",
-        item: { title: node.title },
+        item: { title: node.title } as BrowseItem,
         list: { title: node.title, count: node.items.length, level: this.stack.length - 1, hint: node.listHint ?? null },
       });
     }
@@ -84,38 +108,43 @@ function action(title: string, key: string): BrowseItem {
 
 test("an album expands directly into its track list", async () => {
   const svc = buildService({
-    "album:1": { title: "Dive", items: [track("Awake", "t:1", "Tycho"), track("Daydream", "t:2", "Tycho")] },
+    album1: { title: "Dive", items: [track("Awake", "t:1", "Tycho"), track("Daydream", "t:2", "Tycho")] },
   });
 
-  const out = await svc.getTracksFor({ itemKey: "album:1" });
+  const out = await svc.getTracksFor({ itemKey: loc("album1") });
 
-  assert.equal(out.sourceItemKey, "album:1");
+  assert.equal(out.sourceItemKey, loc("album1"));
   assert.deepEqual(out.skipped, []);
   assert.equal(out.tracks.length, 2);
-  assert.equal(out.tracks[0]?.itemKey, "t:1");
+  // Each track is keyed by a locator extending the source with its index.
+  const first = decodeLocator(out.tracks[0]?.itemKey ?? "");
+  assert.equal(first?.q, "album1");
+  assert.equal(first?.t, 0);
   assert.equal(out.tracks[0]?.title, "Awake");
   assert.equal(out.tracks[0]?.artist, "Tycho");
+  assert.equal(decodeLocator(out.tracks[1]?.itemKey ?? "")?.t, 1);
 });
 
 test("a single track (action menu) returns itself as one track", async () => {
   const svc = buildService({
-    "track:1": {
+    track1: {
       title: "Awake",
       items: [action("Play Now", "a:p"), action("Add to Queue", "a:q")],
       listHint: "action_list",
     },
   });
 
-  const out = await svc.getTracksFor({ itemKey: "track:1" });
+  const out = await svc.getTracksFor({ itemKey: loc("track1") });
 
   assert.equal(out.tracks.length, 1);
-  assert.equal(out.tracks[0]?.itemKey, "track:1");
+  // The candidate is itself the track, so it keeps its own (t-less) locator.
+  assert.equal(out.tracks[0]?.itemKey, loc("track1"));
   assert.equal(out.tracks[0]?.title, "Awake");
 });
 
 test("an artist page with a 'Top Tracks' header returns those tracks, not albums", async () => {
   const svc = buildService({
-    "artist:1": {
+    artist1: {
       title: "Tycho",
       items: [
         header("Top Tracks"),
@@ -127,32 +156,33 @@ test("an artist page with a 'Top Tracks' header returns those tracks, not albums
     },
   });
 
-  const out = await svc.getTracksFor({ itemKey: "artist:1" });
+  const out = await svc.getTracksFor({ itemKey: loc("artist1") });
 
   assert.equal(out.tracks.length, 2);
-  assert.deepEqual(out.tracks.map((t) => t.itemKey).sort(), ["t:1", "t:2"]);
-  assert.ok(out.tracks.every((t) => t.itemKey !== "al:1"));
+  assert.deepEqual(out.tracks.map((t) => t.title).sort(), ["Awake", "Montana"]);
+  assert.ok(out.tracks.every((t) => t.title !== "Dive"));
 });
 
 test("when no direct tracks exist, it drills into a 'Tracks' container", async () => {
   const svc = buildService({
-    "mix:1": {
+    mix1: {
       title: "Daily Mix",
       items: [header("Featured"), nav("Daily Mix", "dm:1"), header("More"), nav("Tracks", "tc:1")],
     },
     "tc:1": { title: "Tracks", items: [track("Song A", "s:1", "VA"), track("Song B", "s:2", "VA")] },
   });
 
-  const out = await svc.getTracksFor({ itemKey: "mix:1" });
+  const out = await svc.getTracksFor({ itemKey: loc("mix1") });
 
-  assert.deepEqual(out.tracks.map((t) => t.itemKey), ["s:1", "s:2"]);
+  assert.deepEqual(out.tracks.map((t) => t.title), ["Song A", "Song B"]);
+  assert.deepEqual(out.tracks.map((t) => decodeLocator(t.itemKey)?.t), [0, 1]);
   assert.deepEqual(out.skipped, []);
 });
 
 test("a non-expandable (message) item returns empty tracks with a skipped reason", async () => {
-  const svc = buildService({ "bad:1": { message: "This item is not available." } });
+  const svc = buildService({ bad1: { message: "This item is not available." } });
 
-  const out = await svc.getTracksFor({ itemKey: "bad:1" });
+  const out = await svc.getTracksFor({ itemKey: loc("bad1") });
 
   assert.deepEqual(out.tracks, []);
   assert.equal(out.skipped.length, 1);
@@ -160,25 +190,26 @@ test("a non-expandable (message) item returns empty tracks with a skipped reason
   assert.match(out.skipped[0]?.reason ?? "", /not available/i);
 });
 
-test("a stale/invalid item key is reported as skipped, not thrown", async () => {
-  const svc = buildService({ "album:1": { title: "Dive", items: [track("Awake", "t:1")] } });
+test("a stale/invalid locator is reported as skipped, not thrown", async () => {
+  const svc = buildService({ album1: { title: "Dive", items: [track("Awake", "t:1")] } });
 
-  const out = await svc.getTracksFor({ itemKey: "ghost" });
+  // A valid locator that no longer resolves (no such query in the tree).
+  const out = await svc.getTracksFor({ itemKey: loc("ghost") });
 
   assert.deepEqual(out.tracks, []);
   assert.equal(out.skipped.length, 1);
-  assert.equal(out.skipped[0]?.itemKey, "ghost");
+  assert.equal(out.skipped[0]?.itemKey, loc("ghost"));
 });
 
 test("limit caps the number of returned tracks", async () => {
   const svc = buildService({
-    "album:big": {
+    albumbig: {
       title: "Big",
       items: Array.from({ length: 20 }, (_, i) => track(`Track ${i}`, `t:${i}`)),
     },
   });
 
-  const out = await svc.getTracksFor({ itemKey: "album:big", limit: 5 });
+  const out = await svc.getTracksFor({ itemKey: loc("albumbig"), limit: 5 });
 
   assert.equal(out.tracks.length, 5);
 });

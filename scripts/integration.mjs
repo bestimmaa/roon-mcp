@@ -137,6 +137,9 @@ async function main() {
 
     if (PLAY) {
       section(`play_now (shuffle) — ROON_PLAY set`);
+      // The genre result was captured before the artist searches above. With
+      // locator-based keys, play_now re-navigates from the query, so the seed
+      // survives those intervening searches (a raw key would have gone stale).
       const seed = topCandidate(genreResult);
       if (!seed) {
         log("No genre candidate to play.");
