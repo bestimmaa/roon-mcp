@@ -10,7 +10,7 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { GenreService } from "./GenreService.js";
+import { GenreService, MIN_GENRE_SCORE, scoreGenre } from "./GenreService.js";
 import { decodeLocator, isGenreLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 
@@ -144,6 +144,32 @@ test("a query that matches nothing returns no candidates", async () => {
   const { svc } = buildService();
   const out = await svc.searchGenres("Polka", 10);
   assert.deepEqual(out, []);
+});
+
+test("scoreGenre: short title tokens (R&B, Children's) don't spuriously match", () => {
+  // "Cumbia" shares a 'b' with R&B and an 's'… with nothing real — must be 0.
+  assert.equal(scoreGenre("Cumbia", "R&B"), 0);
+  assert.equal(scoreGenre("Shoegaze", "Children's"), 0);
+  assert.equal(scoreGenre("Bolero", "R&B"), 0);
+});
+
+test("scoreGenre: a better sub-genre outranks a partial first-word match", () => {
+  // "Psychedelic" covers only the first word of the query; "Psytrance" is the
+  // real near-match and must score higher (the old prefix tier inverted this).
+  assert.ok(scoreGenre("Psychedelic Trance", "Psytrance") > scoreGenre("Psychedelic Trance", "Psychedelic"));
+});
+
+test("scoreGenre: stopwords and short tokens don't dilute coverage", () => {
+  // "Drum and Bass" → both meaningful words match "Jungle/Drum'n'Bass"; "and"
+  // and the title's "n" must not drag the score down.
+  assert.ok(scoreGenre("Drum and Bass", "Jungle/Drum'n'Bass") >= MIN_GENRE_SCORE);
+});
+
+test("absent genres return nothing rather than a noise match", async () => {
+  const { svc } = buildService();
+  for (const q of ["Cumbia", "Bossa Nova", "Bluegrass", "Zydeco"]) {
+    assert.deepEqual(await svc.searchGenres(q, 10), [], `${q} should not match`);
+  }
 });
 
 test("the genre index is built once and reused across searches", async () => {

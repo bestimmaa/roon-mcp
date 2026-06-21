@@ -38,11 +38,26 @@ function collapse(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Connector words carry no genre signal; dropping them keeps coverage fair
+// (e.g. "Drum and Bass" is two meaningful tokens, not three).
+const STOPWORDS = new Set(["and", "the", "of", "an"]);
+// Tokens shorter than this are ignored for fuzzy (substring/prefix) matching:
+// 1–2 char tokens like R&B's "r"/"b" or the "n" in "Drum'n'Bass" otherwise
+// match almost anything and flood results with false positives.
+const MIN_TOKEN_LEN = 3;
+
 function tokens(text: string): string[] {
   return text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
+}
+
+/** Query tokens worth scoring: long enough to be meaningful, not stopwords. */
+function meaningfulTokens(text: string): string[] {
+  const all = tokens(text);
+  const kept = all.filter((tok) => tok.length >= MIN_TOKEN_LEN && !STOPWORDS.has(tok));
+  return kept.length > 0 ? kept : all; // never wipe out an all-short query
 }
 
 function sharedPrefixLen(a: string, b: string): number {
@@ -64,15 +79,27 @@ function isGenreNode(item: BrowseItem): boolean {
   return /\d+\s+artist/i.test(item.subtitle ?? "");
 }
 
+// Token-overlap scores are scaled below the exact/collapsed tiers so a genuine
+// node always outranks a partial match, while a full token-coverage match still
+// scores well (≈0.85).
+const TOKEN_WEIGHT = 0.85;
+// Candidates below this are treated as noise (an absent genre), not a match.
+// Tuned so a single shared word out of two query tokens (≈0.43) still surfaces
+// as a "nearest", but a lone short/prefix coincidence does not.
+export const MIN_GENRE_SCORE = 0.4;
+
 /** Fuzzy match of a free-text query to a genre node title; 0 = no match. */
 export function scoreGenre(query: string, title: string): number {
   const q = normalize(query);
   const t = normalize(title);
   if (t === q) return 1.0;
   if (collapse(query) === collapse(title)) return 0.95;
-  if (t.startsWith(q) || q.startsWith(t)) return 0.8;
 
-  const qTokens = tokens(query);
+  // Per-query-token best overlap with the title's tokens. No blanket
+  // prefix-of-the-whole-string tier: that gave a partial like "Psychedelic"
+  // (covering only the first word of "Psychedelic Trance") an undeserved 0.8,
+  // outranking the better "Psytrance".
+  const qTokens = meaningfulTokens(query);
   const tTokens = tokens(title);
   if (qTokens.length === 0 || tTokens.length === 0) return 0;
 
@@ -80,15 +107,20 @@ export function scoreGenre(query: string, title: string): number {
   for (const qt of qTokens) {
     let best = 0;
     for (const tt of tTokens) {
-      if (qt === tt) best = Math.max(best, 1);
-      else if (tt.includes(qt) || qt.includes(tt)) best = Math.max(best, 0.7);
-      else if (sharedPrefixLen(qt, tt) >= 3) best = Math.max(best, 0.4);
+      if (qt === tt) {
+        best = 1;
+        break;
+      }
+      // Only meaningful (≥3 char) title tokens may fuzzy-match, so short tokens
+      // like "r"/"b"/"n" can't spuriously match.
+      if (tt.length >= MIN_TOKEN_LEN) {
+        if (tt.includes(qt) || qt.includes(tt)) best = Math.max(best, 0.7);
+        else if (sharedPrefixLen(qt, tt) >= 3) best = Math.max(best, 0.4);
+      }
     }
     sum += best;
   }
-  // Scale token matches below the structural tiers above so an exact/prefix
-  // node always outranks a mere token overlap.
-  return (sum / qTokens.length) * 0.7;
+  return (sum / qTokens.length) * TOKEN_WEIGHT;
 }
 
 /** Resolves genre queries by walking and caching the `genres` hierarchy tree. */
@@ -102,7 +134,7 @@ export class GenreService {
     const index = await this.getIndex();
     return index
       .map((entry) => ({ entry, score: scoreGenre(query, entry.title) }))
-      .filter((s) => s.score > 0)
+      .filter((s) => s.score >= MIN_GENRE_SCORE)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map(({ entry, score }) => ({
