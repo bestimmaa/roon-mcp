@@ -47,10 +47,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "node-roon-api": "github:RoonLabs/node-roon-api",
-    "node-roon-api-browse": "github:RoonLabs/node-roon-api-browse",
-    "node-roon-api-status": "github:RoonLabs/node-roon-api-status",
-    "node-roon-api-transport": "github:RoonLabs/node-roon-api-transport",
+    "node-roon-api": "github:RoonLabs/node-roon-api#055dae6c2ac45b6c738aa3b9e5ac1fd722ed60e8",
+    "node-roon-api-browse": "github:RoonLabs/node-roon-api-browse#98adcbaba3a30fd6ce109c1f04cd361536143222",
+    "node-roon-api-status": "github:RoonLabs/node-roon-api-status#504c918d6da267e03fbb4337befa71ca3d3c7526",
+    "node-roon-api-transport": "github:RoonLabs/node-roon-api-transport#2ee60008a4cdb90c34ff3de58bb4b949067f1d20",
     "zod": "^3.23.8"
   },
   "devDependencies": {
