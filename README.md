@@ -111,7 +111,13 @@ Default is `false` (library only).
 
 `now_playing({ zoneId? })` returns a structured snapshot (state, title, artist,
 album, seek position) so the agent can confirm what's on and where before
-running a transport verb. `control_playback` takes one verb at a time
+running a transport verb. The server subscribes to Roon's zone-state stream
+once per paired Core and waits for the next `Changed` event after `play_now`
+/`enqueue_and_play`/`control_playback` — so `nowPlaying` in the response
+reflects the new track rather than the one that was playing before the
+action. The wait times out fast on a slow Core (2 s) and falls back to the
+cached snapshot, so a hung subscription can never delay an MCP call.
+`control_playback` takes one verb at a time
 (`pause`, `resume`, `next`, `previous`, `stop`) — there is no compound
 "pause and skip." For "louder" / "softer" without a number, `set_volume` is
 absolute, so the agent should ask for a target percent or apply a default

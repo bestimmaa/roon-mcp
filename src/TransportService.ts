@@ -8,6 +8,7 @@ import type {
 
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
+import { fingerprintFor, ZoneSubscription } from "./ZoneSubscription.js";
 import { RoonMcpError, type NowPlayingInfo, type ZoneState } from "./types.js";
 import { ZoneService } from "./ZoneService.js";
 
@@ -103,6 +104,14 @@ export class TransportService {
     }
 
     const transport = this.roon.getTransport();
+    const sub = this.roon.getActiveSubscription();
+    // Capture the pre-action fingerprint from the zone we just resolved, so
+    // we can wait for Roon to push a snapshot reflecting the new state.
+    // Reading `get_zones` immediately after the action would still return
+    // the pre-action state (issue #1).
+    const before = sub
+      ? fingerprintFor({ zones: [raw] }, targetId)
+      : undefined;
     await this.logger.call(
       "control",
       { zoneId: targetId, control: verb },
@@ -118,9 +127,18 @@ export class TransportService {
         }),
     );
 
-    // Re-read state so the caller can confirm the verb took effect.
-    const after = await this.findRawZone(targetId);
-    const state = after ? mapState(after.state) : mapState(raw.state);
+    // Wait for the next subscription event that reflects the new state, so
+    // the returned `state` matches what the agent would read from
+    // `now_playing` right after. Times out fast on a slow Core.
+    const after = sub && before
+      ? await sub.waitForZoneChange(targetId, before)
+      : await this.readZonesBody(transport, sub);
+    const zoneAfter = (after.zones ?? []).find(
+      (z) =>
+        z.zone_id === targetId ||
+        (z.outputs ?? []).some((o) => o.output_id === targetId),
+    );
+    const state = zoneAfter ? mapState(zoneAfter.state) : mapState(raw.state);
     return { ok: true, zoneId: targetId, action, state };
   }
 
@@ -226,6 +244,28 @@ export class TransportService {
   private async getZonesBody(): Promise<GetZonesBody> {
     await this.roon.waitForCore();
     const transport: RoonApiTransport = this.roon.getTransport();
+    const sub = this.roon.getActiveSubscription();
+    return this.readZonesBody(transport, sub);
+  }
+
+  /**
+   * Read a zone snapshot, preferring the subscription cache (kept current by
+   * Roon's `Subscribed`/`Changed` events) and falling back to a one-shot
+   * `get_zones` RPC when the cache is empty (cold start, post-reconnect).
+   * The fallback is wrapped in the service's logger so a stderr line still
+   * records the read.
+   */
+  private async readZonesBody(
+    transport: RoonApiTransport,
+    sub: ZoneSubscription | undefined,
+  ): Promise<GetZonesBody> {
+    if (sub) {
+      return sub.getSnapshot(() => this.fallbackGetZones(transport));
+    }
+    return this.fallbackGetZones(transport);
+  }
+
+  private fallbackGetZones(transport: RoonApiTransport): Promise<GetZonesBody> {
     return this.logger.call(
       "get_zones",
       {},

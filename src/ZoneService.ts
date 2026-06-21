@@ -1,11 +1,13 @@
 import type {
   GetZonesBody,
+  RoonApiTransport,
   RoonApiZone,
   RoonZoneState,
 } from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
+import { ZoneSubscription } from "./ZoneSubscription.js";
 import { RoonMcpError, type RoonZone, type ZoneState } from "./types.js";
 
 export interface ZoneResolutionAmbiguous {
@@ -128,7 +130,16 @@ export class ZoneService {
   private async getZonesBody(): Promise<GetZonesBody> {
     await this.roon.waitForCore();
     const transport = this.roon.getTransport();
+    const sub: ZoneSubscription | undefined = this.roon.getActiveSubscription();
+    if (sub) {
+      // Prefer the cache kept current by Roon's `subscribe_zones` events;
+      // fall back to a one-shot `get_zones` only on cold start (cache empty).
+      return sub.getSnapshot(() => this.fallbackGetZones(transport));
+    }
+    return this.fallbackGetZones(transport);
+  }
 
+  private fallbackGetZones(transport: RoonApiTransport): Promise<GetZonesBody> {
     return this.logger.call(
       "get_zones",
       {},

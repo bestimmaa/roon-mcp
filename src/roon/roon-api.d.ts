@@ -207,10 +207,55 @@ declare module "node-roon-api-transport" {
   /** How to interpret the `value` argument of `RoonApiTransport#change_volume`. */
   export type RoonVolumeHow = "absolute" | "relative" | "relative_step";
 
+  /** Body of a `subscribe_zones` `Subscribed` event — the full zone snapshot. */
+  export interface SubscribeZonesSubscribed {
+    zones: RoonApiZone[];
+  }
+
+  /** Body of a `subscribe_zones` `Changed` event — incremental updates. */
+  export interface SubscribeZonesChanged {
+    zones_added?: RoonApiZone[];
+    zones_changed?: RoonApiZone[];
+    zones_removed?: string[];
+    /**
+     * Per-zone seek-position ticks. Arrives frequently while a track is
+     * playing; the snapshot's `now_playing.seek_position` is updated by
+     * node-roon-api-transport's internal cache.
+     */
+    zones_seek_changed?: Array<{
+      zone_id: string;
+      seek_position?: number;
+      queue_time_remaining?: number;
+    }>;
+  }
+
+  /** Body of a `subscribe_zones` `Unsubscribed` event. */
+  export interface SubscribeZonesUnsubscribed {
+    zones?: never;
+  }
+
+  /** Lifecycle of a `subscribe_zones` subscription. */
+  export type SubscribeZonesResponse =
+    | "Subscribed"
+    | "Changed"
+    | "Unsubscribed";
+
   export class RoonApiTransport {
     get_zones(cb: (error: string | false, body: GetZonesBody) => void): void;
+    /**
+     * Subscribe to zone-state updates. The callback fires once with
+     * `response: "Subscribed"` (carrying the full snapshot), then on every
+     * `Changed` event with an incremental delta, and a final time with
+     * `"Unsubscribed"` when the subscription is torn down.
+     */
     subscribe_zones(
-      cb: (response: string, body: unknown) => void,
+      cb: (
+        response: SubscribeZonesResponse,
+        body:
+          | SubscribeZonesSubscribed
+          | SubscribeZonesChanged
+          | SubscribeZonesUnsubscribed,
+      ) => void,
     ): void;
     /**
      * Change zone playback settings. Marked optional because availability

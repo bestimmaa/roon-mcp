@@ -8,6 +8,7 @@ import RoonApiTransport, {
 } from "node-roon-api-transport";
 
 import { RoonMcpError } from "./types.js";
+import { ZoneSubscription, ZoneSubscriptionRegistry } from "./ZoneSubscription.js";
 
 export interface RoonClientOptions {
   extensionId?: string;
@@ -37,6 +38,13 @@ export class RoonClient {
   private readonly roon: RoonApi;
   private readonly status: RoonApiStatus;
   private readonly log: (message: string) => void;
+  /**
+   * Tracks `subscribe_zones` callbacks per paired Core. Read services pull
+   * zone state from this registry's cache (when fresh) and wait on it after
+   * a playback action so `now_playing` reflects the new track rather than
+   * the pre-action one. See issue #1.
+   */
+  private readonly zones = new ZoneSubscriptionRegistry();
 
   private core: RoonCore | undefined;
   private readonly coreWaiters: Array<(core: RoonCore) => void> = [];
@@ -72,6 +80,7 @@ export class RoonClient {
 
   stop(): void {
     // node-roon-api has no clean teardown; drop references and reject waiters.
+    if (this.core) this.zones.stopFor(this.core.core_id);
     this.core = undefined;
     this.coreWaiters.length = 0;
   }
@@ -121,10 +130,35 @@ export class RoonClient {
     return this.core.services.RoonApiBrowse;
   }
 
+  /**
+   * The `subscribe_zones` registry, keyed by `core_id`. Read services use
+   * this to read the cached zone snapshot and to wait for the next change
+   * after a playback action. Returns `undefined` when no Core is paired.
+   */
+  zoneSubscriptions(): ZoneSubscriptionRegistry {
+    return this.zones;
+  }
+
+  /**
+   * The zone subscription for the currently paired Core, or `undefined` when
+   * no Core is paired or the `Subscribed` event has not yet landed. The
+   * subscription is the right place to read the latest zone snapshot and to
+   * wait for the next change after a playback action — see issue #1.
+   */
+  getActiveSubscription(): ZoneSubscription | undefined {
+    if (!this.core) return undefined;
+    return this.zones.forCore(this.core.core_id);
+  }
+
   private onCorePaired(core: RoonCore): void {
     this.core = core;
     this.log(`paired with Core "${core.display_name}" (${core.core_id})`);
     this.status.set_status(`Paired with ${core.display_name}`, false);
+    // Start a `subscribe_zones` subscription for this Core so the cached
+    // snapshot is current before any service reads it. Re-pairs (same core
+    // reappears) drop the prior subscription via the registry.
+    const transport = core.services.RoonApiTransport as RoonTransportService;
+    this.zones.startFor(core.core_id, transport);
 
     const waiters = this.coreWaiters.splice(0, this.coreWaiters.length);
     for (const waiter of waiters) waiter(core);
@@ -132,6 +166,7 @@ export class RoonClient {
 
   private onCoreUnpaired(core: RoonCore): void {
     this.log(`unpaired from Core "${core.display_name}" (${core.core_id})`);
+    this.zones.stopFor(core.core_id);
     if (this.core?.core_id === core.core_id) this.core = undefined;
     this.status.set_status("Waiting for Roon Core…", false);
   }
