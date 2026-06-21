@@ -5,6 +5,14 @@ player, so an AI agent can find music and start playback. Built on the official
 Roon Extension API (`node-roon-api` + `node-roon-api-transport` /
 `node-roon-api-browse`).
 
+---
+
+> **"Play a female vocal trance mix on Roon (Zone: This Computer) — 2000s Dutch trance vibes, the kind of set you'd hear at Amnesia in its prime. Start with something like 4 Strings' Take Me Away."**
+>
+> *Claude searches across your library and streaming, hand-picks the tracks, and queues them — all from a single natural-language prompt.*
+
+---
+
 ## Requirements
 
 - Node.js 20+
