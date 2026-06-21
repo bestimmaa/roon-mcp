@@ -65,11 +65,6 @@ export function hierarchyForLocator(loc: Locator): BrowseHierarchy {
   return isGenreLocator(loc) ? "genres" : "search";
 }
 
-function encode(value: Locator): string {
-  const json = JSON.stringify(value);
-  return PREFIX + Buffer.from(json, "utf8").toString("base64url");
-}
-
 /**
  * Encode a locator as an opaque token suitable for an MCP itemKey. Accepts
  * either shape so callers re-encoding a possibly-genre locator (e.g. adding a
@@ -77,7 +72,8 @@ function encode(value: Locator): string {
  * building genre locators from a path.
  */
 export function encodeLocator(loc: Locator): string {
-  return encode(loc);
+  const json = JSON.stringify(loc);
+  return PREFIX + Buffer.from(json, "utf8").toString("base64url");
 }
 
 /**
@@ -91,7 +87,7 @@ export function encodeGenreLocator(
   const loc: GenreLocator = { ge: path };
   if (coords?.a !== undefined) loc.a = coords.a;
   if (coords?.t !== undefined) loc.t = coords.t;
-  return encode(loc);
+  return encodeLocator(loc);
 }
 
 /** Decode a locator token, or return null if it isn't one (e.g. a raw key). */
@@ -124,9 +120,9 @@ export function decodeLocator(token: string): Locator | null {
 
 /**
  * Derive a track locator by extending a search-item locator with a track index.
- * Genre tracks are addressed by (album, track) — use `encodeGenreLocator` with
- * coords for those — so this preserves any existing genre album index.
+ * Genre tracks are addressed by (album, track) — build those with
+ * `encodeGenreLocator` and coords instead.
  */
-export function withTrackIndex(loc: Locator, t: number): Locator {
-  return isGenreLocator(loc) ? { ge: loc.ge, a: loc.a, t } : { q: loc.q, g: loc.g, i: loc.i, t };
+export function withTrackIndex(loc: SearchLocator, t: number): SearchLocator {
+  return { q: loc.q, g: loc.g, i: loc.i, t };
 }

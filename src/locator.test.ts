@@ -36,15 +36,11 @@ test("a genre track locator carries the (album, track) coordinates", () => {
   assert.equal(loc.t, 5);
 });
 
-test("withTrackIndex preserves the locator shape", () => {
+test("withTrackIndex extends a search locator with a track index", () => {
   const search = decodeLocator(encodeLocator({ q: "x", g: 0, i: 0 }))!;
+  assert.ok(!isGenreLocator(search));
   const searchT = withTrackIndex(search, 3);
-  assert.ok(!isGenreLocator(searchT) && searchT.t === 3);
-
-  const genre = decodeLocator(encodeGenreLocator(["Jazz"]))!;
-  const genreT = withTrackIndex(genre, 5);
-  assert.ok(isGenreLocator(genreT) && genreT.t === 5);
-  assert.deepEqual((genreT as { ge: string[] }).ge, ["Jazz"]);
+  assert.equal(searchT.t, 3);
 });
 
 test("a non-locator token decodes to null", () => {

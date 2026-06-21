@@ -4,7 +4,7 @@ import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { encodeLocator } from "./locator.js";
 import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
-import { TrackExpansionService } from "./TrackExpansionService.js";
+import { perAlbumBudget, TrackExpansionService } from "./TrackExpansionService.js";
 import {
   RoonMcpError,
   type MusicCandidate,
@@ -111,7 +111,7 @@ export class SearchService {
     if (albums.length === 0) return [];
 
     // Spread the budget so the mix draws from several albums, not just the first.
-    const perAlbum = Math.max(1, Math.ceil(limit / Math.min(albums.length, limit)));
+    const perAlbum = perAlbumBudget(limit, albums.length);
 
     const out: MusicCandidate[] = [];
     for (const album of albums) {

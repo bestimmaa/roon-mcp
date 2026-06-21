@@ -55,6 +55,15 @@ function normalize(text: string): string {
   return text.trim().toLowerCase();
 }
 
+/**
+ * Per-album track budget when spreading a total `limit` across `count` albums,
+ * so the result draws from several albums rather than draining the first. At
+ * least 1 each.
+ */
+export function perAlbumBudget(limit: number, count: number): number {
+  return Math.max(1, Math.ceil(limit / Math.min(count, limit)));
+}
+
 /** A "Play Album"/"Play Artist"/"Shuffle"-style whole-container action, not a track. */
 function isPlayAction(item: BrowseItem): boolean {
   return PLAY_ACTION_LABELS.includes(normalize(item.title));
@@ -271,7 +280,7 @@ export class TrackExpansionService {
     if (albums.length === 0) return [];
 
     const out: Array<{ item: BrowseItem; a: number; t: number }> = [];
-    const spread = Math.max(1, Math.ceil(limit / Math.min(albums.length, limit)));
+    const spread = perAlbumBudget(limit, albums.length);
 
     for (let a = 0; a < albums.length && out.length < limit; a++) {
       const album = albums[a]!;
