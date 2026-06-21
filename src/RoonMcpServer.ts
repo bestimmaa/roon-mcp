@@ -6,6 +6,7 @@ import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
+import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
 import { RoonMcpError } from "./types.js";
 
@@ -32,6 +33,7 @@ export class RoonMcpServer {
     private readonly search: SearchService,
     private readonly tracks: TrackExpansionService,
     private readonly playback: PlaybackService,
+    private readonly transport: TransportService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -263,6 +265,172 @@ export class RoonMcpServer {
       async (args) => {
         try {
           const result = await this.playback.enqueueAndPlay(args);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "now_playing",
+      {
+        title: "Get the currently-playing track in a Roon zone",
+        description:
+          "Use this when the user asks what is currently playing, what song is " +
+          "on, who's singing, what just started, or wants a snapshot before " +
+          "skipping or pausing (e.g. \"what's playing?\", \"what's playing in " +
+          "the kitchen?\", \"who's this?\", \"what's the current track?\", " +
+          "\"what song is this?\"). Returns a structured snapshot: zone id and " +
+          "name, playback state (playing/paused/loading/stopped), title, " +
+          "artist, album, and the current seek position when available. " +
+          "`title`/`artist`/`album` are undefined when nothing is playing. " +
+          "Call this before pause/skip/volume changes when the user hasn't " +
+          "named a zone — it confirms where to act and what the state is. " +
+          "zoneId is optional: omit to use ROON_DEFAULT_ZONE, or fall back " +
+          "to the only zone / an \"Office\" zone / the currently-playing zone; " +
+          "if it still can't decide it returns ZONE_AMBIGUOUS so the agent " +
+          "can ask the user or call list_zones.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones (e.g. an id, or a " +
+                "name substring like 'Office'). Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const info = await this.transport.getNowPlaying(args.zoneId);
+          return structured(info);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "control_playback",
+      {
+        title: "Run a Roon transport verb (pause/resume/next/previous/stop)",
+        description:
+          "Use this for the common transport verbs — pause, resume, skip, " +
+          "next track, previous track, stop (e.g. \"pause\", \"pause the " +
+          "kitchen\", \"skip\", \"next track\", \"next song\", \"play the " +
+          "next song\", \"resume\", \"resume in the office\", \"stop\", " +
+          "\"stop the music\"). Runs one transport verb against the resolved " +
+          "zone. For \"louder\"/\"softer\" without a number, call now_playing " +
+          "first to read the current state, then set_volume with a target " +
+          "percent — this tool is verbs only. zoneId is optional and resolves " +
+          "like now_playing. Returns the resolved zoneId, the action taken, " +
+          "and the resulting playback state.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically (see now_playing).",
+            ),
+          action: z
+            .enum(["pause", "resume", "next", "previous", "stop"])
+            .describe(
+              "Transport verb to run: 'pause' to stop playback, 'resume' to " +
+                "restart it, 'next' to skip to the next track, 'previous' to " +
+                "go back, 'stop' to release the audio device.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.transport.control(args.zoneId, args.action);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "set_volume",
+      {
+        title: "Set a Roon zone's volume to a target percent",
+        description:
+          "Use this when the user wants to change how loud a zone is — turn " +
+          "it up, turn it down, set the volume, or pick a level for a " +
+          "specific room (e.g. \"turn it up to 60\", \"volume to 30 in the " +
+          "office\", \"set the kitchen to 50\", \"louder\" — see note). Sets " +
+          "the zone's volume to `level` percent (0 = silent, 100 = max). The " +
+          "server rescales to each output's native range, so a single value " +
+          "works across mixed devices in a grouped zone. Incremental " +
+          "outputs (IR blasters with no numeric range) are reported as " +
+          "skipped rather than guessed at. zoneId is optional and resolves " +
+          "like now_playing. NOTE on relative changes (\"louder\" / \"softer\" " +
+          "without a number): this tool is absolute — read the current " +
+          "state with now_playing isn't enough on its own (volume isn't " +
+          "exposed there), so for relative changes, ask the user for a " +
+          "target percent or apply a reasonable default delta.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          level: z
+            .number()
+            .min(0)
+            .max(100)
+            .describe(
+              "Target volume in percent (0 = silent, 100 = max). Mapped to " +
+                "each output's native range.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.transport.setVolume(args.zoneId, args.level);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "mute",
+      {
+        title: "Mute or unmute a Roon zone",
+        description:
+          "Use this when the user wants to mute or unmute a zone (e.g. " +
+          "\"mute\", \"mute the kitchen\", \"unmute\", \"silence the " +
+          "office\", \"stop the noise\"). Mutes (or unmutes) every output " +
+          "in the resolved zone. zoneId is optional and resolves like " +
+          "now_playing. `muted: true` mutes, `muted: false` unmutes.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          muted: z
+            .boolean()
+            .describe("`true` to mute, `false` to unmute."),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.transport.mute(args.zoneId, args.muted);
           return structured(result);
         } catch (err) {
           return toToolError(err);

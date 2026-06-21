@@ -102,6 +102,48 @@ export interface EnqueueAndPlayOutput extends PlaybackResult {
   requested: number;
 }
 
+/** Verb for the `control_playback` tool. `resume` maps to Roon's `play`. */
+export type TransportAction = "pause" | "resume" | "next" | "previous" | "stop";
+
+export interface ControlPlaybackInput {
+  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
+  zoneId?: string;
+  action: TransportAction;
+}
+
+export interface SetVolumeInput {
+  zoneId?: string;
+  /**
+   * Target volume in percent (0 = silent, 100 = max). The server rescales
+   * to each output's native range, so a single value works across mixed
+   * devices in a grouped zone.
+   */
+  level: number;
+}
+
+export interface MuteInput {
+  zoneId?: string;
+  /** `true` to mute, `false` to unmute. */
+  muted: boolean;
+}
+
+/**
+ * Structured snapshot of a zone's current playback. Fields are populated
+ * only when Roon reports them (e.g. `artist`/`album` are empty when only a
+ * one-line display is available, or when nothing is playing at all).
+ */
+export interface NowPlayingInfo {
+  zoneId: string;
+  displayName: string;
+  state: ZoneState;
+  title?: string;
+  artist?: string;
+  album?: string;
+  imageKey?: string;
+  lengthSec?: number;
+  seekPositionSec?: number;
+}
+
 export type RoonMcpErrorCode =
   | "NO_CORE_PAIRED"
   | "ZONE_NOT_FOUND"

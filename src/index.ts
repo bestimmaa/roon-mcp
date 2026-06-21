@@ -6,6 +6,7 @@ import { RoonClient } from "./RoonClient.js";
 import { RoonMcpServer } from "./RoonMcpServer.js";
 import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
+import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
 import { createStderrLogger } from "./logger.js";
 
@@ -31,7 +32,8 @@ async function main(): Promise<void> {
   const tracks = new TrackExpansionService(browse);
   const search = new SearchService(browse, genres, tracks);
   const playback = new PlaybackService(browse, zones, roon, tracks, logger);
-  const server = new RoonMcpServer(roon, zones, search, tracks, playback);
+  const transport = new TransportService(roon, zones, logger);
+  const server = new RoonMcpServer(roon, zones, search, tracks, playback, transport);
 
   const shutdown = () => {
     void server.stop().finally(() => process.exit(0));

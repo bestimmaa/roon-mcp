@@ -64,6 +64,10 @@ npm install -g roon-mcp
 | `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
 | `play_now({ zoneId?, itemKey, shuffle? })` | Immediately play one search candidate; `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
+| `now_playing({ zoneId? })` | Snapshot of the zone's current track — state, title, artist, album, seek position. `title`/`artist`/`album` are undefined when nothing is playing. |
+| `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop`. |
+| `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
+| `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
 
 ### Genre search
 
@@ -84,6 +88,20 @@ The result lists library genre nodes first, then ready-to-play streaming tracks 
 
 > Cost: with `includeStreaming` on, each sampled album re-navigates the flat search, so
 > an opt-in streaming genre search does a handful of extra browse round-trips.
+
+### Now playing & transport
+
+`now_playing({ zoneId? })` returns a structured snapshot (state, title, artist,
+album, seek position) so the agent can confirm what's on and where before
+running a transport verb. `control_playback` takes one verb at a time
+(`pause`, `resume`, `next`, `previous`, `stop`) — there is no compound
+"pause and skip." For "louder" / "softer" without a number, `set_volume` is
+absolute, so the agent should ask for a target percent or apply a default
+delta; volume isn't reported in `now_playing`. Volume and mute fan out to
+every output in the resolved zone and rescale per output, so a single
+`set_volume({ level: 50 })` works correctly across a grouped zone with mixed
+dB / numeric devices; incremental outputs (IR blasters and the like) are
+reported as `skipped` in the result.
 
 ## Assumptions
 

@@ -144,12 +144,29 @@ declare module "node-roon-api-transport" {
     output_id: string;
     zone_id: string;
     display_name: string;
+    /** Populated for outputs that support volume control. Incremental outputs
+     * (IR blasters and the like) omit `min`/`max`/`step`/`value` and report
+     * `type: "incremental"`; only `is_muted` is meaningful for those. */
+    volume?: {
+      type?: "number" | "db" | "incremental" | string;
+      min?: number;
+      max?: number;
+      value?: number;
+      step?: number;
+      is_muted?: boolean;
+    };
   }
 
   export interface RoonNowPlaying {
     one_line?: { line1: string };
     two_line?: { line1: string; line2?: string };
     three_line?: { line1: string; line2?: string; line3?: string };
+    /** Length of the current media in seconds, when applicable. */
+    length?: number;
+    /** Current seek position in seconds, when applicable. */
+    seek_position?: number;
+    /** Image key for the current media artwork. */
+    image_key?: string;
   }
 
   export interface RoonApiZone {
@@ -158,6 +175,14 @@ declare module "node-roon-api-transport" {
     state: RoonZoneState;
     outputs: RoonOutput[];
     now_playing?: RoonNowPlaying;
+    /** Whether the Core currently allows the corresponding transport verb. */
+    is_previous_allowed?: boolean;
+    is_next_allowed?: boolean;
+    is_pause_allowed?: boolean;
+    is_play_allowed?: boolean;
+    is_seek_allowed?: boolean;
+    /** Current seek position in seconds, when applicable. */
+    seek_position?: number;
   }
 
   export interface GetZonesBody {
@@ -169,6 +194,18 @@ declare module "node-roon-api-transport" {
     auto_radio?: boolean;
     loop?: "loop" | "loop_one" | "disabled";
   }
+
+  /** Verb accepted by `RoonApiTransport#control`. */
+  export type RoonControlVerb =
+    | "play"
+    | "pause"
+    | "playpause"
+    | "stop"
+    | "previous"
+    | "next";
+
+  /** How to interpret the `value` argument of `RoonApiTransport#change_volume`. */
+  export type RoonVolumeHow = "absolute" | "relative" | "relative_step";
 
   export class RoonApiTransport {
     get_zones(cb: (error: string | false, body: GetZonesBody) => void): void;
@@ -183,6 +220,31 @@ declare module "node-roon-api-transport" {
     change_settings?(
       zoneOrOutputId: string,
       settings: RoonZoneSettings,
+      cb?: (error: string | false) => void,
+    ): void;
+    /**
+     * Run a transport verb (play/pause/stop/next/previous/playpause) against a
+     * zone or output. Marked optional for the same reason as `change_settings`.
+     */
+    control?(
+      zoneOrOutput: string,
+      control: RoonControlVerb,
+      cb?: (error: string | false) => void,
+    ): void;
+    /**
+     * Change the volume of an output. Grouped zones may have outputs with
+     * different volume systems, so callers should issue one call per output.
+     */
+    change_volume?(
+      output: string | RoonOutput,
+      how: RoonVolumeHow,
+      value: number,
+      cb?: (error: string | false) => void,
+    ): void;
+    /** Mute or unmute an output. */
+    mute?(
+      output: string | RoonOutput,
+      how: "mute" | "unmute",
       cb?: (error: string | false) => void,
     ): void;
   }
