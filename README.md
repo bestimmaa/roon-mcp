@@ -1,101 +1,59 @@
-# Roon MCP
+# roon-mcp
 
-A minimal [MCP](https://modelcontextprotocol.io) server to control the **Roon** music player, so an AI agent can pick music and start playback.
+An [MCP](https://modelcontextprotocol.io) server to control the **Roon** music
+player, so an AI agent can find music and start playback. Built on the official
+Roon Extension API (`node-roon-api` + `node-roon-api-transport` /
+`node-roon-api-browse`).
 
-Built on the official Roon Extension API (`node-roon-api` + `node-roon-api-transport`).
+## Requirements
 
-## Status
+- Node.js 20+
+- A running **Roon Core** on the local network to pair with
+- **git** on the install host — the `node-roon-api*` dependencies are published
+  on GitHub (not npm) and are fetched via git URLs during install
 
-**Milestone 1 — connection & zone read** ✅
-- [x] MCP server shell (stdio transport)
-- [x] Pair with a Roon Core (`RoonClient`)
-- [x] Read zones (`ZoneService`)
-- [x] `list_zones()` tool
+## MCP Client Configuration
 
-**Milestone 2 — search** ✅
-- [x] Serialized `BrowseSessionManager` (one lock over all browse work)
-- [x] `search_music()` with type filtering and broadening
-- [x] Candidate ranking by title relevance + type
-
-**Milestone 3 — single-item playback** ✅
-- [x] Action discovery (find a Play Now / Shuffle action, incl. nested action lists)
-- [x] `play_now()` against a zone or output id
-- [x] Shuffle via a Shuffle action, with a best-effort Transport `change_settings` fallback
-
-**Milestone 4 — track expansion & curated queue** ✅
-- [x] `get_tracks_for()` expands artist/album/genre/playlist candidates into tracks
-- [x] `enqueue_and_play()` starts the first item (Play Now) and appends the rest (Queue)
-- [x] Partial-failure handling: skipped items are reported with reasons, not fatal
-
-**Milestone 5 — hardening** ✅
-- [x] Retry stale browse/session states once (`BrowseSessionManager.runExclusiveWithRetry`)
-- [x] Structured per-call logs around every Roon API call (`src/logger.ts`)
-- [x] Integration smoke-test script against a live Core (`scripts/integration.mjs`)
-- [x] `save_playlist` decision: **not exposed in v1** (no official Roon write API — see below)
-
-### `save_playlist` — deferred
-
-Roon exposes no official playlist-write service; there is no `create_playlist` /
-`add_to_playlist` in the Extension API. Durable playlists would mean reverse-
-engineering an unsupported flow, which contradicts the v1 non-goals. **Decision:**
-omit `save_playlist` from v1. Curated playback is delivered by `enqueue_and_play`
-(an ad-hoc, in-the-moment queue), which covers the mood/focus use cases without a
-persistence API. Revisit only if a supported browse-action path to save a queue is
-found on a live Core.
-
-### v1 assumptions
-
-Decisions that shape the current contract (see the implementation plan for context):
-
-- **Core language: English.** Category/action label matching (`Artists`, `Play Now`,
-  `Top Tracks`, …) assumes an English Core. A non-English Core needs locale-aware maps.
-- **Sources: local library + TIDAL.** What searches surface (artist *Top Tracks*,
-  genres, playlists) reflects this; results differ on a local-only Core.
-- **Zone targeting: configurable default.** `zoneId` is optional; see `ROON_DEFAULT_ZONE`.
-- **Queue: replace.** `enqueue_and_play` starts a fresh queue (Play Now + append),
-  rather than adding to whatever is already playing.
-- **Curation: agent-side.** Dedupe / cap-per-artist / ordering / trimming stay in the
-  agent; the server has no `CurationService`.
-
-## Setup
-
-```bash
-npm install   # pulls node-roon-api packages from RoonLabs' GitHub
-npm run build
-```
-
-> The `node-roon-api*` packages are published on GitHub, not npm, so `npm install`
-> fetches them via `github:RoonLabs/...` git URLs.
-
-## Run
-
-```bash
-npm start
-```
-
-On first launch, open **Roon → Settings → Extensions** and enable **Roon MCP** to
-pair. The server logs pairing status to stderr; stdout is reserved for the MCP
-protocol.
-
-### Register with an MCP client
+Add this to your MCP client config. `npx` fetches the package on first run:
 
 ```json
 {
   "mcpServers": {
     "roon": {
-      "command": "node",
-      "args": ["/absolute/path/to/roon-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "roon-mcp"],
       "env": { "ROON_DEFAULT_ZONE": "Office" }
     }
   }
 }
 ```
 
-`ROON_DEFAULT_ZONE` (optional) configures the fallback target — a zone/output id
-or a display-name substring — used when `play_now` / `enqueue_and_play` are called
-without a `zoneId`. If unset, the server falls back to the only zone, an `Office`
-zone, or the currently-playing zone; if it still can't decide it returns
-`ZONE_AMBIGUOUS` so the agent can ask.
+On first launch, open **Roon → Settings → Extensions** and enable **Roon MCP**
+to pair. Pairing status is logged to stderr; stdout is reserved for the MCP
+protocol.
+
+### Global install (optional)
+
+```bash
+npm install -g roon-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "roon": {
+      "command": "roon-mcp",
+      "env": { "ROON_DEFAULT_ZONE": "Office" }
+    }
+  }
+}
+```
+
+## Configuration
+
+| Env var | Purpose |
+| --- | --- |
+| `ROON_DEFAULT_ZONE` | Optional fallback target for `play_now` / `enqueue_and_play` when no `zoneId` is given — a zone/output id or a display-name substring. If unset, the server falls back to the only zone, an `Office` zone, or the currently-playing zone; if it still can't decide it returns `ZONE_AMBIGUOUS` so the agent can ask. |
 
 ## Tools
 
@@ -118,18 +76,29 @@ never silently broadens to artists/albums. These candidates are **library-scoped
 with `get_tracks_for` to get a cross-album mix of that genre.
 
 Pass **`includeStreaming: true`** (only meaningful for `type:"genre"`) to also pull a
-track mix from streaming services for discovery beyond your library. Because Roon's
-flat search is text-based rather than genre-filtered, the server doesn't do a raw
-track search (which would just return tracks with the genre word in their title);
-instead it takes the genre-relevant **albums** the flat search surfaces and samples
-tracks across them — the same spread-across-albums approach `get_tracks_for` uses for
-library genres. The result lists library genre nodes first, then ready-to-play
-streaming tracks (each a `track` candidate, source group `Streaming`) appended after.
-Default is `false` (library only).
+track mix from streaming services for discovery beyond your library. The server takes
+the genre-relevant **albums** the flat search surfaces and samples tracks across them.
+The result lists library genre nodes first, then ready-to-play streaming tracks (each a
+`track` candidate, source group `Streaming`) appended after. Default is `false`
+(library only).
 
-> Cost: with `includeStreaming` on, each sampled album re-navigates the flat search
-> (the durable-locator design re-resolves rather than holding stale Roon keys), so an
-> opt-in streaming genre search does a handful of extra browse round-trips.
+> Cost: with `includeStreaming` on, each sampled album re-navigates the flat search, so
+> an opt-in streaming genre search does a handful of extra browse round-trips.
+
+## Assumptions
+
+- **Core language: English.** Category/action label matching (`Artists`, `Play Now`,
+  `Top Tracks`, …) assumes an English Core.
+- **Sources: local library + TIDAL.** What searches surface reflects this; results
+  differ on a local-only Core.
+- **Queue: replace.** `enqueue_and_play` starts a fresh queue rather than adding to
+  whatever is already playing.
+- **Curation is agent-side.** Dedupe / cap-per-artist / ordering / trimming stay in the
+  agent; the server has no curation logic.
+
+There is no `save_playlist` tool: Roon exposes no official playlist-write service, so
+durable playlists are out of scope. Curated playback is delivered by `enqueue_and_play`
+(an ad-hoc, in-the-moment queue).
 
 ## Logging
 
@@ -140,23 +109,30 @@ structured line to **stderr** (stdout stays reserved for MCP JSON-RPC):
 [roon-call] {"t":"2026-06-19T18:00:00.000Z","lvl":"info","op":"browse","ms":12,"params":{"hierarchy":"search","item_key":"…"},"result":{"action":"list","count":7}}
 ```
 
-Failures log `lvl:"error"` with the mapped error code, and retries surface as
-repeated lines for the same `op`. Grep stderr for `[roon-call]` to trace a flow.
+Failures log `lvl:"error"` with the mapped error code, and retries surface as repeated
+lines for the same `op`. Grep stderr for `[roon-call]` to trace a flow.
 
-## Develop
+## Development
 
 ```bash
+npm install              # pulls node-roon-api packages from RoonLabs' GitHub
+npm run build
+npm test                 # builds, then runs node:test
 npm run dev              # tsc --watch
 npm run typecheck
-npm test                 # builds, then runs node:test
-npm run test:integration # smoke-test against a LIVE Roon Core (see below)
+```
+
+Run the built server directly:
+
+```bash
+npm start
 ```
 
 ### Integration smoke test
 
-`scripts/integration.mjs` spawns the built server over stdio (like a real MCP
-client) and runs list → search → expand against your Core. Audible steps are
-opt-in so it never blasts music by accident:
+`scripts/integration.mjs` spawns the built server over stdio (like a real MCP client)
+and runs list → search → expand against your Core. Audible steps are opt-in so it never
+blasts music by accident:
 
 ```bash
 npm run build
@@ -166,5 +142,20 @@ ROON_ENQUEUE=1 node scripts/integration.mjs  # also enqueue a few curated tracks
 # overrides: ROON_ZONE="Office"  ROON_QUERY="Tycho"
 ```
 
-Enable **Roon MCP** under Roon → Settings → Extensions on the first run (the
-script retries `list_zones` for ~45s while it waits to pair).
+Enable **Roon MCP** under Roon → Settings → Extensions on the first run (the script
+retries `list_zones` for ~45s while it waits to pair).
+
+## Releasing
+
+```bash
+npm run release -- <patch|minor|major>
+```
+
+Requires a clean worktree on `main` and a matching `## [<version>]` entry in
+[CHANGELOG.md](CHANGELOG.md). The script runs the tests, bumps the version, tags the
+commit, and verifies the package with `npm pack`. It then prints the push and
+`npm publish` commands to run.
+
+## License
+
+[MIT](LICENSE)

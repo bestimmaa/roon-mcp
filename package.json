@@ -1,21 +1,46 @@
 {
   "name": "roon-mcp",
   "version": "0.1.0",
-  "description": "A minimal MCP server to control the Roon music player.",
+  "description": "An MCP server to control the Roon music player.",
+  "license": "MIT",
+  "author": "Christoph Halang",
   "type": "module",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "roon",
+    "music",
+    "playback"
+  ],
   "bin": {
     "roon-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://bitbucket.org/bestimmaa/roon-mcp.git"
+  },
+  "bugs": {
+    "url": "https://bitbucket.org/bestimmaa/roon-mcp/issues"
+  },
+  "homepage": "https://bitbucket.org/bestimmaa/roon-mcp#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc && chmod +x dist/index.js",
+    "prepare": "npm run build",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test \"dist/**/*.test.js\"",
-    "test:integration": "tsc && node scripts/integration.mjs"
+    "test:integration": "tsc && node scripts/integration.mjs",
+    "release": "node scripts/release.js"
   },
   "engines": {
     "node": ">=20"
