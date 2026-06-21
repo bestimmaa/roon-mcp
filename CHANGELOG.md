@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
-## [Unreleased]
+## [0.2.1]
 
 ### Fixed
 
@@ -14,6 +14,11 @@ The version history source of truth is git tags in the format `vMAJOR.MINOR.PATC
   `Changed` event after a playback action before reading the snapshot, so
   the response reflects the new track. Falls back to the cached snapshot
   after a 2 s timeout so a slow Core never delays an MCP call.
+
+### Changed
+
+- README: added a natural-language example prompt to illustrate conversational
+  Roon control via an AI agent.
 
 ## [0.2.0] - 2026-06-21
 
