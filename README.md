@@ -1,5 +1,7 @@
 # roon-mcp
 
+[![npm version](https://img.shields.io/npm/v/roon-mcp.svg)](https://www.npmjs.com/package/roon-mcp)
+
 An [MCP](https://modelcontextprotocol.io) server to control the **Roon** music
 player, so an AI agent can find music and start playback. Built on the official
 Roon Extension API (`node-roon-api` + `node-roon-api-transport` /
