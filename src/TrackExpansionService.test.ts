@@ -10,7 +10,12 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { decodeLocator, encodeLocator, isGenreLocator } from "./locator.js";
+import {
+  decodeLocator,
+  encodeGenreLocator,
+  encodeLocator,
+  isGenreLocator,
+} from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 
@@ -293,6 +298,149 @@ test("a stale/invalid locator is reported as skipped, not thrown", async () => {
   assert.deepEqual(out.tracks, []);
   assert.equal(out.skipped.length, 1);
   assert.equal(out.skipped[0]?.itemKey, loc("ghost"));
+});
+
+// --- Genre expansion (the `genres` hierarchy, addressed by album+track) ---
+
+/** A node in a fake `genres` tree, navigated by key. */
+interface GNode {
+  title: string;
+  key: string;
+  subtitle?: string;
+  hint?: BrowseItem["hint"];
+  children?: GNode[];
+}
+
+/** Stateful model of the `genres` hierarchy: a keyed tree with a level stack. */
+class FakeGenres {
+  private stack: GNode[][] = [];
+  private readonly byKey = new Map<string, GNode>();
+
+  constructor(private readonly root: GNode[]) {
+    const index = (nodes: GNode[]) => {
+      for (const n of nodes) {
+        this.byKey.set(n.key, n);
+        if (n.children) index(n.children);
+      }
+    };
+    index(root);
+  }
+
+  browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
+    if (o.pop_levels) {
+      for (let i = 0; i < o.pop_levels; i++) this.stack.pop();
+      return cb(false, { action: "list" });
+    }
+    if (o.pop_all) {
+      this.stack = [this.root];
+      return cb(false, { action: "list" });
+    }
+    if (o.item_key !== undefined) {
+      const node = this.byKey.get(o.item_key);
+      if (!node) return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
+      this.stack.push(node.children ?? []);
+      return cb(false, {
+        action: "list",
+        item: { title: node.title } as BrowseItem,
+        list: { title: node.title, count: node.children?.length ?? 0, level: this.stack.length - 1 },
+      });
+    }
+    return cb(false, { action: "none" });
+  }
+
+  load(o: LoadOptions, cb: (e: string | false, b: LoadResultBody) => void): void {
+    const top = this.stack[this.stack.length - 1] ?? [];
+    const items: BrowseItem[] = top.map((n) => ({
+      title: n.title,
+      item_key: n.key,
+      subtitle: n.subtitle,
+      hint: n.hint,
+    }));
+    cb(false, { items, offset: o.offset ?? 0, list: { title: "", count: items.length, level: 0 } });
+  }
+}
+
+/** A track leaf in the genre tree (bare leaf: no hint, so it's a track row). */
+function gtrack(title: string, key: string, subtitle?: string): GNode {
+  return { title, key, subtitle };
+}
+
+function buildGenreService(root: GNode[]): TrackExpansionService {
+  const fake = new FakeGenres(root);
+  const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
+  return new TrackExpansionService(new BrowseSessionManager(stub));
+}
+
+// A genre page with an "Albums" container holding three albums of varying size.
+const PSYTRANCE_TREE: GNode[] = [
+  {
+    title: "Psytrance",
+    key: "g:psy",
+    subtitle: "0 Artists, 3 Albums",
+    hint: "list",
+    children: [
+      { title: "Play Genre", key: "a:pg", hint: "action_list" },
+      { title: "Artists", key: "c:art", hint: "list" },
+      {
+        title: "Albums",
+        key: "c:alb",
+        hint: "list",
+        children: [
+          {
+            title: "Album One",
+            key: "al:1",
+            hint: "list",
+            children: [gtrack("A1", "t:a1", "DJ One"), gtrack("A2", "t:a2", "DJ One"), gtrack("A3", "t:a3", "DJ One")],
+          },
+          {
+            title: "Album Two",
+            key: "al:2",
+            hint: "list",
+            children: [gtrack("B1", "t:b1", "DJ Two"), gtrack("B2", "t:b2", "DJ Two")],
+          },
+          { title: "Album Three", key: "al:3", hint: "list", children: [gtrack("C1", "t:c1", "DJ Three")] },
+        ],
+      },
+    ],
+  },
+];
+
+const genreLoc = encodeGenreLocator(["Psytrance"]);
+
+test("a genre expands across its albums, not just the first", async () => {
+  const svc = buildGenreService(PSYTRANCE_TREE);
+  const out = await svc.getTracksFor({ itemKey: genreLoc, limit: 10 });
+
+  assert.deepEqual(out.skipped, []);
+  // Tracks come from all three albums (the old behavior returned only Album One).
+  assert.deepEqual(out.tracks.map((t) => t.title), ["A1", "A2", "A3", "B1", "B2", "C1"]);
+  assert.equal(out.tracks[0]?.artist, "DJ One");
+  // Each is keyed by a genre locator with (album, track) coordinates.
+  const coords = out.tracks.map((t) => {
+    const loc = decodeLocator(t.itemKey)!;
+    assert.ok(isGenreLocator(loc));
+    return [loc.a, loc.t];
+  });
+  assert.deepEqual(coords, [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [2, 0]]);
+});
+
+test("a small limit spreads the budget across albums", async () => {
+  const svc = buildGenreService(PSYTRANCE_TREE);
+  const out = await svc.getTracksFor({ itemKey: genreLoc, limit: 3 });
+  // One track from each album rather than three from Album One.
+  assert.deepEqual(out.tracks.map((t) => t.title), ["A1", "B1", "C1"]);
+});
+
+test("a genre track re-resolves to a live key for playback (album→track)", async () => {
+  const svc = buildGenreService(PSYTRANCE_TREE);
+  const out = await svc.getTracksFor({ itemKey: genreLoc, limit: 10 });
+  // "B2" is album index 1, track index 1.
+  const b2 = out.tracks.find((t) => t.title === "B2");
+  const loc = decodeLocator(b2!.itemKey)!;
+  assert.ok(isGenreLocator(loc) && loc.a === 1 && loc.t === 1);
+
+  const opened = await svc.openTrackForPlayback(loc);
+  assert.equal(opened.item?.title, "B2");
 });
 
 test("limit caps the number of returned tracks", async () => {

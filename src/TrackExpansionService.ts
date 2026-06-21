@@ -2,9 +2,12 @@ import type { BrowseHierarchy, BrowseItem, BrowseList, BrowseResultBody } from "
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import {
+  encodeGenreLocator,
   encodeLocator,
   hierarchyForLocator,
+  isGenreLocator,
   withTrackIndex,
+  type GenreLocator,
   type Locator,
 } from "./locator.js";
 import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
@@ -125,6 +128,21 @@ export class TrackExpansionService {
         const opened = await this.navigator.openItem(loc);
         if (opened.action === "message") return notExpandable(input.itemKey, opened.message);
 
+        // A genre has no track list of its own; gather tracks across its albums,
+        // each keyed by an (album, track) genre locator.
+        if (isGenreLocator(loc)) {
+          const collected = await this.collectGenreAlbumTracks(hierarchy, limit);
+          if (collected.length === 0) {
+            return notExpandable(input.itemKey, "No albums with tracks were found for this genre.");
+          }
+          const tracks: TrackCandidate[] = collected.map(({ item, a, t }) => ({
+            itemKey: encodeGenreLocator(loc.ge, { a, t }),
+            ...toTrackMeta(item),
+            available: true,
+          }));
+          return { sourceItemKey: input.itemKey, tracks, skipped: [] };
+        }
+
         const resolved = await this.resolveTracks(hierarchy, opened);
         if (resolved.kind === "none") return notExpandable(input.itemKey, resolved.reason);
         if (resolved.kind === "self") {
@@ -165,8 +183,12 @@ export class TrackExpansionService {
    */
   async openTrackForPlayback(loc: Locator): Promise<BrowseResultBody> {
     const hierarchy = hierarchyForLocator(loc);
+    if (loc.t === undefined) return this.navigator.openItem(loc); // candidate is itself the track
+
+    // Genre tracks live two levels down (album, track); re-navigate there.
+    if (isGenreLocator(loc)) return this.openGenreTrack(loc, hierarchy);
+
     const opened = await this.navigator.openItem(loc);
-    if (loc.t === undefined) return opened; // candidate is itself the track
     if (opened.action === "message") {
       throw new RoonMcpError("INVALID_ITEM_KEY", opened.message ?? "Track is no longer available.");
     }
@@ -194,12 +216,11 @@ export class TrackExpansionService {
    *      the artist's top album drilled into its own track list.
    *
    * For (C) we drill a single container (the labelled track list if present,
-   * else the top album). Returning tracks from just one album keeps the
-   * resolution a single live list, which the {q,g,i,t} locator and
-   * `openTrackForPlayback` rely on: `t` indexes that one ordered list, and
-   * re-resolving re-derives the identical list with live keys. Flattening
-   * across several albums would strand the earlier albums' keys (Roon keys are
-   * level-scoped — see locator.ts) and need a second album index in the scheme.
+   * else the top album), keeping the resolution a single live list that the
+   * {q,g,i,t} locator and `openTrackForPlayback` rely on: `t` indexes that one
+   * ordered list, and re-resolving re-derives it with live keys. (Genres, which
+   * have no track list of their own, are expanded across albums via
+   * `collectGenreAlbumTracks` before this is reached.)
    */
   private async resolveTracks(
     hierarchy: BrowseHierarchy,
@@ -230,34 +251,79 @@ export class TrackExpansionService {
       if (tracks.length > 0) return { kind: "list", items: tracks };
     }
 
-    // Genre page: no track list of its own. Drill "Albums" → first album → its
-    // track list. Deterministic (first album) so openTrackForPlayback re-derives
-    // the identical list for the {ge,t} locator.
-    const fromGenre = await this.resolveGenreAlbumTracks(hierarchy, loaded.items);
-    if (fromGenre) return fromGenre;
-
     return { kind: "none", reason: "No playable tracks were found for this item." };
   }
 
-  /** For a genre page, drill Albums → first album → tracks. */
-  private async resolveGenreAlbumTracks(
+  /**
+   * Gather a genre's tracks by drilling its "Albums" container and visiting each
+   * album in turn, spreading the budget across albums (so the result isn't just
+   * the first album's tracks). Each track carries its (album, track) coordinates
+   * so the `{ ge, a, t }` locator re-navigates to it. The session must be
+   * positioned on the genre page; album-list keys survive drilling+popping a
+   * sibling (same pattern as SearchService.collectFromGroups), so one pass
+   * collects across albums with live keys.
+   */
+  private async collectGenreAlbumTracks(
     hierarchy: BrowseHierarchy,
-    items: BrowseItem[],
-  ): Promise<TrackResolution | null> {
-    const albums = items.find(
+    limit: number,
+  ): Promise<Array<{ item: BrowseItem; a: number; t: number }>> {
+    const albums = await this.openGenreAlbums(hierarchy);
+    if (albums.length === 0) return [];
+
+    const out: Array<{ item: BrowseItem; a: number; t: number }> = [];
+    const spread = Math.max(1, Math.ceil(limit / Math.min(albums.length, limit)));
+
+    for (let a = 0; a < albums.length && out.length < limit; a++) {
+      const album = albums[a]!;
+      if (!album.item_key) continue;
+      await this.browse.browse({ hierarchy, item_key: album.item_key });
+      const trackList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
+      const tracks = this.extractTracks(trackList.items);
+      for (let t = 0; t < tracks.length && t < spread && out.length < limit; t++) {
+        out.push({ item: tracks[t]!, a, t });
+      }
+      // Level-scoped keys: pop back to the album list before the next album.
+      await this.browse.browse({ hierarchy, pop_levels: 1 });
+    }
+    return out;
+  }
+
+  /** Re-navigate a genre track locator to a live key for playback (album→track). */
+  private async openGenreTrack(
+    loc: GenreLocator,
+    hierarchy: BrowseHierarchy,
+  ): Promise<BrowseResultBody> {
+    const opened = await this.navigator.openItem(loc);
+    if (opened.action === "message") {
+      throw new RoonMcpError("INVALID_ITEM_KEY", opened.message ?? "Track is no longer available.");
+    }
+    const albums = await this.openGenreAlbums(hierarchy);
+    const album = albums[loc.a ?? 0];
+    if (!album?.item_key) throw staleGenreTrack();
+
+    await this.browse.browse({ hierarchy, item_key: album.item_key });
+    const trackList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
+    const track = this.extractTracks(trackList.items)[loc.t!];
+    if (!track?.item_key) throw staleGenreTrack();
+
+    return this.browse.browse({ hierarchy, item_key: track.item_key });
+  }
+
+  /**
+   * From a genre page (session already positioned there), drill its "Albums"
+   * container and return the album containers, leaving the session on the album
+   * list. Returns [] when there's no Albums container.
+   */
+  private async openGenreAlbums(hierarchy: BrowseHierarchy): Promise<BrowseItem[]> {
+    const page = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
+    const albumsContainer = page.items.find(
       (i) => isContainer(i) && normalize(i.title) === ALBUMS_CONTAINER_LABEL,
     );
-    if (!albums?.item_key) return null;
+    if (!albumsContainer?.item_key) return [];
 
-    await this.browse.browse({ hierarchy, item_key: albums.item_key });
+    await this.browse.browse({ hierarchy, item_key: albumsContainer.item_key });
     const albumList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
-    const firstAlbum = albumList.items.find(isContainer);
-    if (!firstAlbum?.item_key) return null;
-
-    await this.browse.browse({ hierarchy, item_key: firstAlbum.item_key });
-    const trackList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
-    const tracks = this.extractTracks(trackList.items);
-    return tracks.length > 0 ? { kind: "list", items: tracks } : null;
+    return albumList.items.filter(isContainer);
   }
 
   /**
@@ -307,6 +373,13 @@ function splitByHeaders(items: BrowseItem[]): Array<{ header?: string; items: Br
   }
   if (current.header !== undefined || current.items.length > 0) sections.push(current);
   return sections;
+}
+
+function staleGenreTrack(): RoonMcpError {
+  return new RoonMcpError(
+    "INVALID_ITEM_KEY",
+    "That genre track is no longer available; re-run get_tracks_for to refresh it.",
+  );
 }
 
 function notExpandable(itemKey: string, reason?: string): GetTracksForOutput {

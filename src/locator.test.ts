@@ -23,7 +23,17 @@ test("a genre locator round-trips and reports the genres hierarchy", () => {
   const loc = decodeLocator(token);
   assert.ok(loc && isGenreLocator(loc));
   assert.deepEqual(loc.ge, ["Electronic", "Trance", "Psytrance"]);
+  assert.equal(loc.a, undefined);
+  assert.equal(loc.t, undefined);
   assert.equal(hierarchyForLocator(loc), "genres");
+});
+
+test("a genre track locator carries the (album, track) coordinates", () => {
+  const token = encodeGenreLocator(["Electronic", "Trance", "Psytrance"], { a: 2, t: 5 });
+  const loc = decodeLocator(token);
+  assert.ok(loc && isGenreLocator(loc));
+  assert.equal(loc.a, 2);
+  assert.equal(loc.t, 5);
 });
 
 test("withTrackIndex preserves the locator shape", () => {

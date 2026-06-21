@@ -40,10 +40,16 @@ export interface SearchLocator {
  * A path back to a genre node in the `genres` hierarchy:
  *   ge  ordered genre node titles from the root, e.g.
  *       ["Electronic", "Trance", "Psytrance"]
- *   t   optional index into the ordered tracks expanded from the genre
+ *   a   optional index into the genre's "Albums" container (which album)
+ *   t   optional index into that album's track list (which track)
+ *
+ * A genre has no track list of its own, so its tracks are addressed two levels
+ * down: album `a`, then track `t` within it. Both are set together for an
+ * expanded genre track; a bare `{ ge }` is the genre node itself.
  */
 export interface GenreLocator {
   ge: string[];
+  a?: number;
   t?: number;
 }
 
@@ -74,9 +80,17 @@ export function encodeLocator(loc: Locator): string {
   return encode(loc);
 }
 
-/** Encode a genre locator (a path of genre node titles) as an opaque token. */
-export function encodeGenreLocator(path: string[], t?: number): string {
-  const loc: GenreLocator = t === undefined ? { ge: path } : { ge: path, t };
+/**
+ * Encode a genre locator. With no coords it points at the genre node itself;
+ * with `{ a, t }` it points at track `t` of album `a` inside the genre.
+ */
+export function encodeGenreLocator(
+  path: string[],
+  coords?: { a?: number; t?: number },
+): string {
+  const loc: GenreLocator = { ge: path };
+  if (coords?.a !== undefined) loc.a = coords.a;
+  if (coords?.t !== undefined) loc.t = coords.t;
   return encode(loc);
 }
 
@@ -90,6 +104,7 @@ export function decodeLocator(token: string): Locator | null {
     // Genre locator: a path of node titles.
     if (Array.isArray(obj.ge) && obj.ge.every((s) => typeof s === "string")) {
       const loc: GenreLocator = { ge: obj.ge };
+      if (typeof obj.a === "number") loc.a = obj.a;
       if (typeof obj.t === "number") loc.t = obj.t;
       return loc;
     }
@@ -107,7 +122,11 @@ export function decodeLocator(token: string): Locator | null {
   }
 }
 
-/** Derive a track locator by extending an item locator with a track index. */
+/**
+ * Derive a track locator by extending a search-item locator with a track index.
+ * Genre tracks are addressed by (album, track) — use `encodeGenreLocator` with
+ * coords for those — so this preserves any existing genre album index.
+ */
 export function withTrackIndex(loc: Locator, t: number): Locator {
-  return isGenreLocator(loc) ? { ge: loc.ge, t } : { q: loc.q, g: loc.g, i: loc.i, t };
+  return isGenreLocator(loc) ? { ge: loc.ge, a: loc.a, t } : { q: loc.q, g: loc.g, i: loc.i, t };
 }
