@@ -46,8 +46,12 @@ export class RoonMcpServer {
       {
         title: "List Roon zones",
         description:
-          "List the playable zones/outputs exposed by the paired Roon Core. " +
-          "Returns each zone's id, display name, playback state, and output ids.",
+          "Use this when the user asks which rooms, speakers, or outputs Roon can " +
+          "play to, or before starting playback when the target zone is unclear " +
+          "(e.g. \"what zones are on?\", \"play in the kitchen\", \"which speaker is " +
+          "in the office?\"). Lists every zone/output the paired Core exposes with " +
+          "its id, display name, current playback state, and output ids. Call this " +
+          "first if no zone is obvious and ROON_DEFAULT_ZONE is not set.",
         inputSchema: {},
       },
       async () => {
@@ -67,24 +71,38 @@ export class RoonMcpServer {
       {
         title: "Search Roon music",
         description:
-          "Resolve a text query into ranked Roon browse candidates. Optionally " +
-          "filter by item type (artist, album, track, genre, playlist, radio); " +
-          "for non-genre types, an empty typed search broadens to all categories. " +
-          "type:\"genre\" is special: genres don't appear in Roon's flat search, so " +
-          "the server walks the dedicated Genres tree and returns the nearest-match " +
-          "genre nodes (with their parent path in the subtitle) without broadening — " +
-          "e.g. \"Psychedelic Trance\" yields \"Psytrance\"/\"Trance\". Set " +
-          "includeStreaming:true (only meaningful for type:\"genre\") to also pull a " +
-          "track mix from streaming services (e.g. TIDAL): the server takes the " +
-          "genre-relevant albums and samples tracks across them, so library genre " +
-          "nodes are listed first and ready-to-play streaming tracks appended after. " +
-          "Returns opaque, session-scoped item keys for use by playback tools.",
+          "Use this when the user names music to find — an artist, album, track, " +
+          "playlist, radio station, or genre (e.g. \"find Tycho\", \"look up the " +
+          "album In Rainbows\", \"play some Psytrance\", \"anything by Ryuichi " +
+          "Sakamoto?\"). Resolves a free-text query into ranked Roon browse " +
+          "candidates. Optionally restrict to one item type (artist, album, track, " +
+          "genre, playlist, radio); for non-genre types, an empty typed search " +
+          "broadens to all categories. type:\"genre\" is special — genres don't " +
+          "appear in Roon's flat search, so the server walks the dedicated Genres " +
+          "tree and returns the nearest-match genre nodes (with parent path in the " +
+          "subtitle) without broadening; e.g. \"Psychedelic Trance\" yields " +
+          "\"Psytrance\"/\"Trance\". Set includeStreaming:true (only meaningful for " +
+          "type:\"genre\") to also pull a track mix from streaming services " +
+          "(e.g. TIDAL): the server takes the genre-relevant albums and samples " +
+          "tracks across them, so library genre nodes come first and ready-to-play " +
+          "streaming tracks are appended after. Returns opaque, session-scoped item " +
+          "keys for use by the playback tools — pair with get_tracks_for to expand, " +
+          "then play_now or enqueue_and_play.",
         inputSchema: {
-          query: z.string().min(1).describe("Free-text search, e.g. 'Dark Ambient' or 'Tycho'."),
+          query: z
+            .string()
+            .min(1)
+            .describe(
+              "What to search for — an artist, album, track, playlist, radio, or " +
+                "genre name (e.g. 'Tycho', 'In Rainbows', 'Dark Ambient').",
+            ),
           type: z
             .enum(MUSIC_ITEM_TYPES)
             .optional()
-            .describe("Restrict results to this item type."),
+            .describe(
+              "Restrict the search to one item type. Omit to broaden across all " +
+                "non-genre categories. Use 'genre' for music-genre lookups.",
+            ),
           limit: z
             .number()
             .int()
@@ -96,9 +114,9 @@ export class RoonMcpServer {
             .boolean()
             .optional()
             .describe(
-              "Also pull a track mix from streaming services. " +
-                "Only applies when type is \"genre\": library genre nodes come first, " +
-                "then tracks sampled across genre-relevant streaming albums. Default false.",
+              "Only for type 'genre': also pull a track mix from streaming services " +
+                "(e.g. TIDAL). Library genre nodes come first, then sampled streaming " +
+                "tracks. Default false (library only).",
             ),
         },
       },
@@ -117,16 +135,23 @@ export class RoonMcpServer {
       {
         title: "Expand a Roon item into tracks",
         description:
-          "Expand an artist, album, genre, or playlist candidate into concrete " +
-          "playable tracks. Pass an itemKey from a recent search_music result. " +
-          "Returns track candidates with session-scoped item keys (use them " +
-          "promptly with enqueue_and_play). Non-expandable items return empty " +
-          "tracks with a skipped reason rather than an error.",
+          "Use this after search_music when the user wants a concrete list of " +
+          "songs — to preview tracks, build a queue, or pick one to start with " +
+          "(e.g. \"what tracks are on this album?\", \"give me 5 tracks of " +
+          "Dark Ambient\", \"what's on this playlist?\"). Expands an artist, " +
+          "album, genre, or playlist candidate into concrete playable tracks. " +
+          "Pass an itemKey from a recent search_music result. Returns track " +
+          "candidates with session-scoped item keys (use them promptly with " +
+          "enqueue_and_play). Non-expandable items return empty tracks with a " +
+          "skipped reason rather than an error.",
         inputSchema: {
           itemKey: z
             .string()
             .min(1)
-            .describe("Opaque item key from a recent search_music result."),
+            .describe(
+              "Item key to expand — from a recent search_music candidate (artist, " +
+                "album, genre, or playlist).",
+            ),
           limit: z
             .number()
             .int()
@@ -151,22 +176,34 @@ export class RoonMcpServer {
       {
         title: "Play an item now in a Roon zone",
         description:
-          "Immediately play a single search candidate in the target zone. Pass an " +
-          "itemKey from a recent search_music result (item keys are session-scoped, " +
-          "so use a fresh one). zoneId is optional: omit it to use the configured " +
-          "default zone (ROON_DEFAULT_ZONE) or the single/Office/playing fallback; " +
-          "an ambiguous result returns ZONE_AMBIGUOUS so you can ask. Optionally " +
-          "shuffle. Returns a PlaybackResult.",
+          "Use this when the user wants one specific thing playing right now — " +
+          "an album, artist, playlist, genre mix, or single track (e.g. \"play " +
+          "Tycho\", \"put on In Rainbows\", \"start some Psytrance in the office\", " +
+          "\"play that track\"). Immediately plays a single search candidate in " +
+          "the target zone and replaces whatever was queued. Pass an itemKey from " +
+          "a recent search_music (or get_tracks_for) result — item keys are " +
+          "session-scoped, so use a fresh one. zoneId is optional: omit it to use " +
+          "ROON_DEFAULT_ZONE, or fall back to the only zone / an \"Office\" zone / " +
+          "the currently-playing zone; if it still can't decide it returns " +
+          "ZONE_AMBIGUOUS so the agent can ask the user or call list_zones. " +
+          "Optionally shuffle. Returns a PlaybackResult.",
         inputSchema: {
           zoneId: z
             .string()
             .min(1)
             .optional()
-            .describe("Target zone id or output id (from list_zones). Omit to use the default zone."),
+            .describe(
+              "Target zone id or output id from list_zones (e.g. an id, or a name " +
+                "substring like 'Office'). Omit to use ROON_DEFAULT_ZONE or fall " +
+                "back automatically.",
+            ),
           itemKey: z
             .string()
             .min(1)
-            .describe("Opaque item key from a recent search_music result."),
+            .describe(
+              "What to play — item key from a recent search_music or get_tracks_for " +
+                "result (album, artist, playlist, genre, track, etc.).",
+            ),
           shuffle: z
             .boolean()
             .optional()
@@ -188,10 +225,15 @@ export class RoonMcpServer {
       {
         title: "Build and start a curated Roon queue",
         description:
-          "Build an ad-hoc queue from an ordered list of curated item keys and " +
-          "start playback in the target zone. This replaces the zone's current " +
+          "Use this when the user wants a custom lineup — a mix of artists, a " +
+          "shuffled selection across albums, a hand-picked set of tracks, or any " +
+          "time \"queue\", \"setlist\", \"mix of\", or \"play these in order\" comes " +
+          "up (e.g. \"queue up five Tycho tracks then some Boards of Canada\", " +
+          "\"shuffle 10 ambient tracks\", \"build a set: artist A, then B, then C\"). " +
+          "Builds an ad-hoc queue from an ordered list of curated item keys and " +
+          "starts playback in the target zone. This replaces the zone's current " +
           "queue: the first playable item starts immediately (Play Now), the rest " +
-          "are appended in order. Pass itemKeys from recent get_tracks_for/" +
+          "are appended in order. Pass itemKeys from recent get_tracks_for / " +
           "search_music results (use them promptly — they are session-scoped). " +
           "zoneId is optional (omit to use the default zone; see play_now). " +
           "Optionally shuffle. Returns a PlaybackResult with queued/skipped counts " +
@@ -201,11 +243,17 @@ export class RoonMcpServer {
             .string()
             .min(1)
             .optional()
-            .describe("Target zone id or output id (from list_zones). Omit to use the default zone."),
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use the default " +
+                "zone (see play_now).",
+            ),
           itemKeys: z
             .array(z.string().min(1))
             .min(1)
-            .describe("Ordered item keys to queue (from get_tracks_for/search_music)."),
+            .describe(
+              "Ordered item keys to queue, from recent get_tracks_for or " +
+                "search_music results (tracks, albums, artists, etc.).",
+            ),
           shuffle: z
             .boolean()
             .optional()
