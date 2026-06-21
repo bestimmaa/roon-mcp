@@ -23,12 +23,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://bitbucket.org/bestimmaa/roon-mcp.git"
+    "url": "git+https://github.com/bestimmaa/roon-mcp.git"
   },
   "bugs": {
-    "url": "https://bitbucket.org/bestimmaa/roon-mcp/issues"
+    "url": "https://github.com/bestimmaa/roon-mcp/issues"
   },
-  "homepage": "https://bitbucket.org/bestimmaa/roon-mcp#readme",
+  "homepage": "https://github.com/bestimmaa/roon-mcp#readme",
   "publishConfig": {
     "access": "public"
   },

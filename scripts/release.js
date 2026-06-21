@@ -15,7 +15,7 @@ const allowedReleaseTypes = new Set(["patch", "minor", "major"]);
 const usageMessage = "Usage: npm run release -- <patch|minor|major>";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const expectedRepoSlug = "bestimmaa/roon-mcp";
-const expectedRemoteUrl = `git@bitbucket.org:${expectedRepoSlug}.git`;
+const expectedRemoteUrl = `git@github.com:${expectedRepoSlug}.git`;
 const releaseFiles = ["package.json", "package-lock.json"];
 
 function run(command, args, options = {}) {
@@ -114,7 +114,7 @@ function ensureChangelogEntry(version) {
 }
 
 function isExpectedRemote(url) {
-  return /(?:bitbucket\.org|github\.com)[:/]bestimmaa\/roon-mcp(?:\.git)?$/i.test(url);
+  return /^github\.com[:/]bestimmaa\/roon-mcp(?:\.git)?$/i.test(url);
 }
 
 function restoreReleaseFiles() {
