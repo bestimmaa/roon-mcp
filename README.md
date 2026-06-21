@@ -102,10 +102,34 @@ zone, or the currently-playing zone; if it still can't decide it returns
 | Tool | Purpose |
 | --- | --- |
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
-| `search_music({ query, type?, limit? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). |
+| `search_music({ query, type?, limit?, includeStreaming? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). `type` (`artist`/`album`/`track`/`genre`/`playlist`/`radio`) restricts the category; for non-genre types an empty typed search broadens to all categories. See [Genre search](#genre-search) for `type:"genre"` and `includeStreaming`. |
 | `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
 | `play_now({ zoneId?, itemKey, shuffle? })` | Immediately play one search candidate; `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
+
+### Genre search
+
+Genres don't appear in Roon's flat search hierarchy, so `search_music({ type: "genre" })`
+is handled specially: the server walks Roon's dedicated **Genres** tree (cached per
+session) and returns the nearest-match genre nodes by fuzzy score, with their parent
+path in the subtitle — e.g. `"Psychedelic Trance"` yields `Psytrance` / `Trance`. It
+never silently broadens to artists/albums. These candidates are **library-scoped**
+(genres present in your collection, including TIDAL albums you've added). Expand one
+with `get_tracks_for` to get a cross-album mix of that genre.
+
+Pass **`includeStreaming: true`** (only meaningful for `type:"genre"`) to also pull a
+track mix from streaming services for discovery beyond your library. Because Roon's
+flat search is text-based rather than genre-filtered, the server doesn't do a raw
+track search (which would just return tracks with the genre word in their title);
+instead it takes the genre-relevant **albums** the flat search surfaces and samples
+tracks across them — the same spread-across-albums approach `get_tracks_for` uses for
+library genres. The result lists library genre nodes first, then ready-to-play
+streaming tracks (each a `track` candidate, source group `Streaming`) appended after.
+Default is `false` (library only).
+
+> Cost: with `includeStreaming` on, each sampled album re-navigates the flat search
+> (the durable-locator design re-resolves rather than holding stale Roon keys), so an
+> opt-in streaming genre search does a handful of extra browse round-trips.
 
 ## Logging
 
