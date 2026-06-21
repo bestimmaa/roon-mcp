@@ -1,8 +1,13 @@
-import type { BrowseItem, BrowseList, BrowseResultBody } from "node-roon-api-browse";
+import type { BrowseHierarchy, BrowseItem, BrowseList, BrowseResultBody } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { encodeLocator, withTrackIndex, type Locator } from "./locator.js";
-import { SearchNavigator, SEARCH_HIERARCHY, requireLocator } from "./SearchNavigator.js";
+import {
+  encodeLocator,
+  hierarchyForLocator,
+  withTrackIndex,
+  type Locator,
+} from "./locator.js";
+import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
 import {
   RoonMcpError,
   type GetTracksForInput,
@@ -19,6 +24,12 @@ const SCAN_COUNT = 100;
 // plan item (mirrors SearchService's GROUP_TITLE_TO_TYPE / PlaybackService's
 // PLAY_LABELS caveat): non-English Cores need locale-aware matching here.
 const TRACK_SECTION_LABELS = ["top tracks", "tracks", "popular", "songs"];
+
+// A genre page has no track list of its own — just "Artists"/"Albums"
+// containers and sub-genres. To expand a genre into tracks we drill its
+// "Albums" container and then its first album's track list. English-only, same
+// caveat as TRACK_SECTION_LABELS.
+const ALBUMS_CONTAINER_LABEL = "albums";
 
 // Leading "Play …"/"Shuffle" shortcut rows that play a whole album/artist/
 // playlist rather than an individual track. They share the `action_list` hint
@@ -110,10 +121,11 @@ export class TrackExpansionService {
 
     return this.browse.runExclusive(async () => {
       try {
+        const hierarchy = hierarchyForLocator(loc);
         const opened = await this.navigator.openItem(loc);
         if (opened.action === "message") return notExpandable(input.itemKey, opened.message);
 
-        const resolved = await this.resolveTracks(opened);
+        const resolved = await this.resolveTracks(hierarchy, opened);
         if (resolved.kind === "none") return notExpandable(input.itemKey, resolved.reason);
         if (resolved.kind === "self") {
           // The candidate is a single track; key it by its own (t-less) locator.
@@ -152,13 +164,14 @@ export class TrackExpansionService {
    * `runExclusive`. Throws INVALID_ITEM_KEY if the track no longer resolves.
    */
   async openTrackForPlayback(loc: Locator): Promise<BrowseResultBody> {
+    const hierarchy = hierarchyForLocator(loc);
     const opened = await this.navigator.openItem(loc);
     if (loc.t === undefined) return opened; // candidate is itself the track
     if (opened.action === "message") {
       throw new RoonMcpError("INVALID_ITEM_KEY", opened.message ?? "Track is no longer available.");
     }
 
-    const resolved = await this.resolveTracks(opened);
+    const resolved = await this.resolveTracks(hierarchy, opened);
     if (resolved.kind !== "list" || !resolved.items[loc.t]?.item_key) {
       throw new RoonMcpError(
         "INVALID_ITEM_KEY",
@@ -166,7 +179,7 @@ export class TrackExpansionService {
       );
     }
     return this.browse.browse({
-      hierarchy: SEARCH_HIERARCHY,
+      hierarchy,
       item_key: resolved.items[loc.t]!.item_key!,
     });
   }
@@ -188,9 +201,12 @@ export class TrackExpansionService {
    * across several albums would strand the earlier albums' keys (Roon keys are
    * level-scoped — see locator.ts) and need a second album index in the scheme.
    */
-  private async resolveTracks(opened: BrowseResultBody): Promise<TrackResolution> {
+  private async resolveTracks(
+    hierarchy: BrowseHierarchy,
+    opened: BrowseResultBody,
+  ): Promise<TrackResolution> {
     const loaded = await this.browse.load({
-      hierarchy: SEARCH_HIERARCHY,
+      hierarchy,
       offset: 0,
       count: SCAN_COUNT,
     });
@@ -204,9 +220,9 @@ export class TrackExpansionService {
 
     const container = this.findTrackContainer(loaded.items);
     if (container?.item_key) {
-      await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: container.item_key });
+      await this.browse.browse({ hierarchy, item_key: container.item_key });
       const sub = await this.browse.load({
-        hierarchy: SEARCH_HIERARCHY,
+        hierarchy,
         offset: 0,
         count: SCAN_COUNT,
       });
@@ -214,7 +230,34 @@ export class TrackExpansionService {
       if (tracks.length > 0) return { kind: "list", items: tracks };
     }
 
+    // Genre page: no track list of its own. Drill "Albums" → first album → its
+    // track list. Deterministic (first album) so openTrackForPlayback re-derives
+    // the identical list for the {ge,t} locator.
+    const fromGenre = await this.resolveGenreAlbumTracks(hierarchy, loaded.items);
+    if (fromGenre) return fromGenre;
+
     return { kind: "none", reason: "No playable tracks were found for this item." };
+  }
+
+  /** For a genre page, drill Albums → first album → tracks. */
+  private async resolveGenreAlbumTracks(
+    hierarchy: BrowseHierarchy,
+    items: BrowseItem[],
+  ): Promise<TrackResolution | null> {
+    const albums = items.find(
+      (i) => isContainer(i) && normalize(i.title) === ALBUMS_CONTAINER_LABEL,
+    );
+    if (!albums?.item_key) return null;
+
+    await this.browse.browse({ hierarchy, item_key: albums.item_key });
+    const albumList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
+    const firstAlbum = albumList.items.find(isContainer);
+    if (!firstAlbum?.item_key) return null;
+
+    await this.browse.browse({ hierarchy, item_key: firstAlbum.item_key });
+    const trackList = await this.browse.load({ hierarchy, offset: 0, count: SCAN_COUNT });
+    const tracks = this.extractTracks(trackList.items);
+    return tracks.length > 0 ? { kind: "list", items: tracks } : null;
   }
 
   /**

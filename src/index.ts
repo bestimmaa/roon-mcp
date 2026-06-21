@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { GenreService } from "./GenreService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { RoonMcpServer } from "./RoonMcpServer.js";
@@ -26,7 +27,8 @@ async function main(): Promise<void> {
   const defaultZone = process.env.ROON_DEFAULT_ZONE?.trim() || undefined;
   const zones = new ZoneService(roon, logger, defaultZone);
   const browse = new BrowseSessionManager(roon, logger);
-  const search = new SearchService(browse);
+  const genres = new GenreService(browse);
+  const search = new SearchService(browse, genres);
   const tracks = new TrackExpansionService(browse);
   const playback = new PlaybackService(browse, zones, roon, tracks, logger);
   const server = new RoonMcpServer(roon, zones, search, tracks, playback);

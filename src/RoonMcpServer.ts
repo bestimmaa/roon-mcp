@@ -69,8 +69,12 @@ export class RoonMcpServer {
         description:
           "Resolve a text query into ranked Roon browse candidates. Optionally " +
           "filter by item type (artist, album, track, genre, playlist, radio); " +
-          "if a typed search is empty the server broadens to all categories. " +
-          "Returns opaque, session-scoped item keys for use by playback tools.",
+          "for non-genre types, an empty typed search broadens to all categories. " +
+          "type:\"genre\" is special: genres don't appear in Roon's flat search, so " +
+          "the server walks the dedicated Genres tree and returns the nearest-match " +
+          "genre nodes (with their parent path in the subtitle) without broadening — " +
+          "e.g. \"Psychedelic Trance\" yields \"Psytrance\"/\"Trance\". Returns opaque, " +
+          "session-scoped item keys for use by playback tools.",
         inputSchema: {
           query: z.string().min(1).describe("Free-text search, e.g. 'Dark Ambient' or 'Tycho'."),
           type: z

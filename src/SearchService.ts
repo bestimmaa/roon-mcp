@@ -1,6 +1,7 @@
 import type { BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { GenreService } from "./GenreService.js";
 import { encodeLocator } from "./locator.js";
 import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
 import {
@@ -41,14 +42,35 @@ function groupTitleToType(title: string): MusicItemType {
 
 /** Turns a text query into ranked browse candidates via the search hierarchy. */
 export class SearchService {
-  constructor(private readonly browse: BrowseSessionManager) {}
+  constructor(
+    private readonly browse: BrowseSessionManager,
+    private readonly genres: GenreService,
+  ) {}
 
   async searchMusic(input: SearchMusicInput): Promise<SearchMusicOutput> {
     const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
 
+    // Genres don't appear in Roon's flat search; resolve them via the dedicated
+    // `genres` hierarchy instead (GenreService), and never silently broaden to
+    // artists/albums — that hid the failure before.
+    if (input.type === "genre") {
+      return this.searchGenres(input.query, limit);
+    }
+
     // Search builds its own item keys inside performSearch, so a stale-session
     // failure is recoverable with one reset-and-replay (see runExclusiveWithRetry).
     return this.browse.runExclusiveWithRetry(() => this.performSearch(input, limit));
+  }
+
+  private async searchGenres(query: string, limit: number): Promise<SearchMusicOutput> {
+    const candidates = await this.genres.searchGenres(query, limit);
+    let message: string | undefined;
+    if (candidates.length === 0) {
+      message = `No genres matched "${query}".`;
+    } else if ((candidates[0]?.score ?? 0) < 1) {
+      message = `No genre exactly named "${query}"; showing nearest genres.`;
+    }
+    return { query, candidates, broadened: false, message };
   }
 
   private async performSearch(

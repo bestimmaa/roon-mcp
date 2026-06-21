@@ -3,6 +3,7 @@ import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
+import { hierarchyForLocator } from "./locator.js";
 import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
@@ -14,10 +15,9 @@ import {
   type PlayNowInput,
 } from "./types.js";
 
-// Item keys handed to playback are `search_music` locators, so we drive the
-// playback drill in the same (search) hierarchy that produced them, by
-// re-navigating to a live key via SearchNavigator.
-const PLAY_HIERARCHY: BrowseHierarchy = "search";
+// Item keys handed to playback are locators; we drive the playback drill in the
+// hierarchy that produced them (flat "search" for most items, "genres" for a
+// genre), re-navigating to a live key via SearchNavigator.
 const LOAD_COUNT = 100;
 
 // English Roon action labels, ordered by preference (highest first). The plan
@@ -106,6 +106,8 @@ export class PlaybackService {
     zoneId: string,
     shuffle: boolean,
   ): Promise<PlaybackResult> {
+    const hierarchy = hierarchyForLocator(loc);
+
     // 1. Re-navigate to a live key for the located item and open it.
     const opened = await this.navigator.openItem(loc);
     if (opened.action === "message") {
@@ -117,7 +119,7 @@ export class PlaybackService {
 
     // 2. Discover a play (or shuffle) action among the item's options.
     const labels = shuffle ? [...SHUFFLE_LABELS, ...PLAY_LABELS] : PLAY_LABELS;
-    const { action } = await this.findAction(labels);
+    const { action } = await this.findAction(hierarchy, labels);
     if (!action) {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
@@ -129,7 +131,7 @@ export class PlaybackService {
     // 3. Invoke the action against the target zone. Starting new content must
     //    go through a Browse action carrying zone_or_output_id (not Transport).
     const result = await this.browse.browse({
-      hierarchy: PLAY_HIERARCHY,
+      hierarchy,
       item_key: action.item_key!,
       zone_or_output_id: zoneId,
     });
@@ -254,6 +256,7 @@ export class PlaybackService {
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     try {
       const loc = requireLocator(itemKey);
+      const hierarchy = hierarchyForLocator(loc);
       // A track locator (t set) resolves through the track list; an item
       // locator opens the candidate directly.
       const opened =
@@ -264,11 +267,11 @@ export class PlaybackService {
         return { ok: false, reason: opened.message ?? "Item is not playable." };
       }
 
-      const { action } = await this.findAction(labels);
+      const { action } = await this.findAction(hierarchy, labels);
       if (!action) return { ok: false, reason: "No matching play/queue action." };
 
       const result = await this.browse.browse({
-        hierarchy: PLAY_HIERARCHY,
+        hierarchy,
         item_key: action.item_key!,
         zone_or_output_id: zoneId,
       });
@@ -297,10 +300,11 @@ export class PlaybackService {
    * Reports how many extra levels it pushed so callers can pop back.
    */
   private async findAction(
+    hierarchy: BrowseHierarchy,
     labels: string[],
   ): Promise<{ action: BrowseItem | null; extraLevelsPushed: number }> {
     const loaded = await this.browse.load({
-      hierarchy: PLAY_HIERARCHY,
+      hierarchy,
       offset: 0,
       count: LOAD_COUNT,
     });
@@ -310,9 +314,9 @@ export class PlaybackService {
 
     const container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
     if (container) {
-      await this.browse.browse({ hierarchy: PLAY_HIERARCHY, item_key: container.item_key! });
+      await this.browse.browse({ hierarchy, item_key: container.item_key! });
       const sub = await this.browse.load({
-        hierarchy: PLAY_HIERARCHY,
+        hierarchy,
         offset: 0,
         count: LOAD_COUNT,
       });

@@ -1,11 +1,22 @@
 import type { BrowseHierarchy, BrowseItem, BrowseResultBody } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { decodeLocator, type Locator } from "./locator.js";
+import {
+  decodeLocator,
+  hierarchyForLocator,
+  isGenreLocator,
+  type GenreLocator,
+  type Locator,
+  type SearchLocator,
+} from "./locator.js";
 import { RoonMcpError } from "./types.js";
 
-// All search results live in the "search" hierarchy; we re-navigate there.
+export { hierarchyForLocator } from "./locator.js";
+
+// Flat-search results live in the "search" hierarchy; we re-navigate there.
 export const SEARCH_HIERARCHY: BrowseHierarchy = "search";
+// Genre nodes live in the dedicated "genres" hierarchy.
+const GENRES_HIERARCHY: BrowseHierarchy = "genres";
 // Load generously when re-resolving so a locator index is never cut off by a
 // short page (search itself may have collected with a small `limit`).
 const RESOLVE_COUNT = 100;
@@ -39,6 +50,10 @@ export class SearchNavigator {
    * Compose inside `runExclusive` — this issues a multi-step browse sequence.
    */
   async openItem(loc: Locator): Promise<BrowseResultBody> {
+    return isGenreLocator(loc) ? this.openGenrePath(loc) : this.openSearchItem(loc);
+  }
+
+  private async openSearchItem(loc: SearchLocator): Promise<BrowseResultBody> {
     await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, input: loc.q, pop_all: true });
 
     const top = await this.browse.load({
@@ -61,6 +76,36 @@ export class SearchNavigator {
     if (!item?.item_key) throw STALE();
 
     return this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: item.item_key });
+  }
+
+  /**
+   * Re-walk the `genres` hierarchy by node title, drilling each segment of the
+   * path from the root, and browse *into* the final genre node. Matching by
+   * title (not a stale key) keeps the locator durable across calls — the same
+   * reasoning as the search locator.
+   */
+  private async openGenrePath(loc: GenreLocator): Promise<BrowseResultBody> {
+    await this.browse.browse({ hierarchy: GENRES_HIERARCHY, pop_all: true });
+
+    let last: BrowseResultBody | undefined;
+    for (const name of loc.ge) {
+      const level = await this.browse.load({
+        hierarchy: GENRES_HIERARCHY,
+        offset: 0,
+        count: RESOLVE_COUNT,
+      });
+      const target = name.trim().toLowerCase();
+      const node = level.items
+        .filter(isSelectable)
+        .find((i) => i.title.trim().toLowerCase() === target);
+      if (!node?.item_key) throw STALE();
+
+      last = await this.browse.browse({ hierarchy: GENRES_HIERARCHY, item_key: node.item_key });
+      if (last.action !== "list") throw STALE();
+    }
+
+    if (!last) throw STALE();
+    return last;
   }
 
   /** Load the children of the currently-opened item (its actions or sub-list). */

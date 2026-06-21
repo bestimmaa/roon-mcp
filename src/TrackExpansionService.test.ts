@@ -10,7 +10,7 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { decodeLocator, encodeLocator } from "./locator.js";
+import { decodeLocator, encodeLocator, isGenreLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 
@@ -127,8 +127,9 @@ test("an album expands directly into its track list", async () => {
   assert.equal(out.tracks.length, 2);
   // Each track is keyed by a locator extending the source with its index.
   const first = decodeLocator(out.tracks[0]?.itemKey ?? "");
-  assert.equal(first?.q, "album1");
-  assert.equal(first?.t, 0);
+  assert.ok(first && !isGenreLocator(first));
+  assert.equal(first.q, "album1");
+  assert.equal(first.t, 0);
   assert.equal(out.tracks[0]?.title, "Awake");
   assert.equal(out.tracks[0]?.artist, "Tycho");
   assert.equal(decodeLocator(out.tracks[1]?.itemKey ?? "")?.t, 1);

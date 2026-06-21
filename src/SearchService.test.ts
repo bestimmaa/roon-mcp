@@ -10,7 +10,8 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { decodeLocator } from "./locator.js";
+import { GenreService } from "./GenreService.js";
+import { decodeLocator, isGenreLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 
@@ -80,7 +81,8 @@ class FakeBrowse {
 function buildService(groups: GroupDef[], opts?: FakeOpts): SearchService {
   const fake = new FakeBrowse(groups, opts);
   const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
-  return new SearchService(new BrowseSessionManager(stub));
+  const browse = new BrowseSessionManager(stub);
+  return new SearchService(browse, new GenreService(browse));
 }
 
 function item(title: string, key: string): BrowseItem {
@@ -113,9 +115,10 @@ test("searchMusic returns ranked candidates keyed by re-navigable locators", asy
   // The itemKey is a locator carrying the query + group/item indices, not the
   // raw (ephemeral) Roon key.
   const decoded = decodeLocator(out.candidates[0]?.itemKey ?? "");
-  assert.equal(decoded?.q, "Tycho");
-  assert.equal(typeof decoded?.g, "number");
-  assert.equal(decoded?.i, 0);
+  assert.ok(decoded && !isGenreLocator(decoded));
+  assert.equal(decoded.q, "Tycho");
+  assert.equal(typeof decoded.g, "number");
+  assert.equal(decoded.i, 0);
   // Exact title match ranks above the prefix match.
   assert.ok((out.candidates[0]?.score ?? 0) > (out.candidates[1]?.score ?? 0));
 });
@@ -135,6 +138,16 @@ test("a typed search with no matching items broadens to all categories", async (
   assert.equal(out.broadened, true);
   assert.match(out.message ?? "", /broadened/i);
   assert.equal(out.candidates[0]?.title, "Dark Ambient");
+});
+
+test("type:genre is resolved via the genres tree, not broadened to artists", async () => {
+  // The flat-search fake has no genres tree, so resolution yields no genres —
+  // crucially it must NOT silently broaden back to the artist/album groups.
+  const svc = buildService([ARTISTS, ALBUMS, GENRES]);
+  const out = await svc.searchMusic({ query: "Dark Ambient", type: "genre" });
+  assert.equal(out.broadened, false);
+  assert.deepEqual(out.candidates, []);
+  assert.match(out.message ?? "", /No genres matched/i);
 });
 
 test("limit caps the number of returned candidates", async () => {
