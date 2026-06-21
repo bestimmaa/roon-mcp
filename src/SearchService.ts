@@ -61,7 +61,26 @@ export class SearchService {
 
     // Search builds its own item keys inside performSearch, so a stale-session
     // failure is recoverable with one reset-and-replay (see runExclusiveWithRetry).
-    return this.browse.runExclusiveWithRetry(() => this.performSearch(input, limit));
+    const library = await this.browse.runExclusiveWithRetry(() => this.performSearch(input, limit));
+
+    // Artist search is library-only: when the artist has no library content
+    // (subtitle "0 Albums") or isn't in the library at all, optionally append a
+    // streaming track mix so the user request "play/queue <artist>" doesn't
+    // dead-end at get_tracks_for. Mirrors the genre streaming path's shape:
+    // library results first, streaming tracks appended with sourceGroup
+    // "Streaming". See collectStreamingArtistTracks.
+    if (input.type === "artist" && input.includeStreaming) {
+      const streaming = await this.collectStreamingArtistTracks(input.query, limit);
+      if (streaming.length > 0) {
+        const candidates = [...library.candidates, ...streaming];
+        const message = library.message
+          ? `${library.message} Also showing ${streaming.length} streaming track(s).`
+          : `No library artist matched "${input.query}"; showing streaming tracks.`;
+        return { query: input.query, candidates, broadened: library.broadened, message };
+      }
+    }
+
+    return library;
   }
 
   private async searchGenres(
@@ -134,6 +153,49 @@ export class SearchService {
     return out;
   }
 
+  /**
+   * Artist discovery beyond the library. The library album search that
+   * collectStreamingGenreTracks leans on returns nothing for an artist that
+   * has been fully removed from the library, so we go one level shallower: a
+   * track search, filtered to entries whose subtitle (the track's artist in
+   * Roon's flat search) matches the queried artist. On a TIDAL Core this
+   * surfaces the artist's streaming catalog as ready-to-play tracks. The
+   * result is best-effort: a small fraction may be features or compilations
+   * — the agent's per-artist cap / dedupe (see README "Curation is
+   * agent-side") handles that.
+   */
+  private async collectStreamingArtistTracks(
+    query: string,
+    limit: number,
+  ): Promise<MusicCandidate[]> {
+    const trackSearch = await this.browse.runExclusiveWithRetry(() =>
+      this.performSearch({ query, type: "track" }, limit),
+    );
+    const tracks = trackSearch.candidates.filter((c) => c.type === "track");
+    if (tracks.length === 0) return [];
+
+    const q = normalize(query);
+    const matched = tracks.filter((t) => {
+      const artist = normalize(t.subtitle ?? "");
+      // Substring is enough: Roon track subtitles are the artist (sometimes
+      // "Artist / Album"); a fuller match doesn't help here. We fall back to
+      // the track's own title as a last resort so a query that exactly
+      // matches a single-song single (e.g. a self-titled track) still
+      // surfaces something.
+      return artist === q || artist.includes(q) || normalize(t.title) === q;
+    });
+
+    return matched.slice(0, limit).map((t) => ({
+      itemKey: t.itemKey,
+      title: t.title,
+      subtitle: t.subtitle,
+      type: "track" as const,
+      score: t.score,
+      available: t.available,
+      sourceGroup: "Streaming",
+    }));
+  }
+
   private async performSearch(
     input: SearchMusicInput,
     limit: number,
@@ -191,6 +253,16 @@ export class SearchService {
       message = `No "${input.type}" matches; broadened to all categories.`;
     } else if (ranked.length === 0) {
       message = "No results.";
+    }
+
+    // When an artist search surfaces a candidate with no library content,
+    // surface that up front so the agent doesn't have to discover the dead
+    // end at get_tracks_for time. The streaming-artist fallback in
+    // searchMusic picks this up.
+    if (input.type === "artist" && /^\s*0\s+albums?\s*$/i.test(ranked[0]?.subtitle ?? "")) {
+      const name = ranked[0]!.title;
+      const hint = `Artist "${name}" has no library albums; pass includeStreaming:true to sample streaming tracks.`;
+      message = message ? `${message} ${hint}` : hint;
     }
 
     return { query: input.query, candidates: ranked, broadened, message };

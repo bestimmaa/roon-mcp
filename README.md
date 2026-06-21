@@ -60,7 +60,7 @@ npm install -g roon-mcp
 | Tool | Purpose |
 | --- | --- |
 | `list_zones()` | List playable zones/outputs (id, name, state, output ids). |
-| `search_music({ query, type?, limit?, includeStreaming? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). `type` (`artist`/`album`/`track`/`genre`/`playlist`/`radio`) restricts the category; for non-genre types an empty typed search broadens to all categories. See [Genre search](#genre-search) for `type:"genre"` and `includeStreaming`. |
+| `search_music({ query, type?, limit?, includeStreaming? })` | Resolve a text query into ranked browse candidates (opaque, session-scoped item keys). `type` (`artist`/`album`/`track`/`genre`/`playlist`/`radio`) restricts the category; for non-genre types an empty typed search broadens to all categories. See [Streaming search](#streaming-search-genre-and-artist) for `type:"genre"`/`type:"artist"` and `includeStreaming`. |
 | `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
 | `play_now({ zoneId?, itemKey, shuffle? })` | Immediately play one search candidate; `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
@@ -69,7 +69,7 @@ npm install -g roon-mcp
 | `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
 | `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
 
-### Genre search
+### Streaming search (genre and artist)
 
 Genres don't appear in Roon's flat search hierarchy, so `search_music({ type: "genre" })`
 is handled specially: the server walks Roon's dedicated **Genres** tree (cached per
@@ -79,15 +79,33 @@ never silently broadens to artists/albums. These candidates are **library-scoped
 (genres present in your collection, including TIDAL albums you've added). Expand one
 with `get_tracks_for` to get a cross-album mix of that genre.
 
-Pass **`includeStreaming: true`** (only meaningful for `type:"genre"`) to also pull a
-track mix from streaming services for discovery beyond your library. The server takes
-the genre-relevant **albums** the flat search surfaces and samples tracks across them.
-The result lists library genre nodes first, then ready-to-play streaming tracks (each a
-`track` candidate, source group `Streaming`) appended after. Default is `false`
-(library only).
+Artist search is library-scoped too: `search_music({ type: "artist" })` returns artists
+present in your collection. When the top-ranked artist has no library content — e.g. a
+node with `subtitle: "0 Albums"` because all albums were removed, or an artist not in
+your library at all but available on TIDAL — the result's `message` field carries a
+hint so the agent can opt in to the streaming path (see below) without having to
+discover the dead end at `get_tracks_for` time.
 
-> Cost: with `includeStreaming` on, each sampled album re-navigates the flat search, so
-> an opt-in streaming genre search does a handful of extra browse round-trips.
+Pass **`includeStreaming: true`** (meaningful for both `type:"genre"` and
+`type:"artist"`) to also pull a track mix from streaming services for discovery beyond
+your library:
+
+- For `type:"genre"`, the server takes the genre-relevant **albums** the flat search
+  surfaces and samples tracks across them. Library genre nodes come first, then
+  ready-to-play streaming tracks (each a `track` candidate, source group `Streaming`)
+  appended after.
+- For `type:"artist"`, the server runs a track search and filters to entries by that
+  artist (matching the track's subtitle, which Roon uses for the artist on track rows).
+  Library artist candidates come first, then streaming tracks by the same artist
+  appended after. This is the path that unblocks "play/queue multiple *Artist* songs"
+  for an artist with no library content: the streaming tracks are queue-playable
+  directly via `enqueue_and_play`. Results are best-effort — a small fraction may be
+  features or compilations; the agent's per-artist cap / dedupe handles that.
+
+Default is `false` (library only).
+
+> Cost: with `includeStreaming` on, each sampled album/track re-navigates the flat
+> search, so an opt-in streaming search does a handful of extra browse round-trips.
 
 ### Now playing & transport
 

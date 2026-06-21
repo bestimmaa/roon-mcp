@@ -201,10 +201,90 @@ test("includeStreaming samples a track mix across genre-relevant albums", async 
   assert.ok(albumIndices.size >= 2);
 });
 
-test("includeStreaming is ignored for non-genre searches", async () => {
-  const svc = buildService([ARTISTS]);
-  const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true });
-  assert.ok(out.candidates.every((c) => c.type === "artist"));
+test("includeStreaming for type:artist appends streaming tracks by that artist", async () => {
+  // Mirrors the live "Helene Fischer" scenario from issue #2: the artist
+  // exists in the library with subtitle "0 Albums", and streaming-side tracks
+  // for the same artist surface from a track search. The artist search
+  // returns the (empty) library node; the streaming path runs a track search
+  // filtered to that artist's subtitle.
+  const artists: GroupDef = {
+    title: "Artists",
+    key: "g:artists",
+    items: [{ ...item("Helene Fischer", "a:hf"), subtitle: "0 Albums" }],
+  };
+  const tracks: GroupDef = {
+    title: "Tracks",
+    key: "g:tracks",
+    items: [
+      { title: "Atemlos durch die Nacht", item_key: "tk:1", subtitle: "Helene Fischer" },
+      { title: "Herzbeben", item_key: "tk:2", subtitle: "Helene Fischer" },
+      { title: "Other Artist Song", item_key: "tk:3", subtitle: "Other Artist" },
+    ],
+  };
+  const svc = buildService([artists, tracks]);
+  const out = await svc.searchMusic({
+    query: "Helene Fischer",
+    type: "artist",
+    includeStreaming: true,
+  });
+
+  // Library artist comes first, then streaming tracks by the same artist.
+  // Other-artist entries are filtered out by the subtitle match in
+  // collectStreamingArtistTracks.
+  assert.equal(out.candidates[0]?.title, "Helene Fischer");
+  assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
+  assert.equal(streaming.length, 2);
+  assert.ok(streaming.every((c) => c.type === "track"));
+  assert.ok(streaming.every((c) => c.subtitle === "Helene Fischer"));
+  assert.ok(streaming.every((c) => c.title !== "Other Artist Song"));
+  assert.match(out.message ?? "", /no library albums/i);
+  assert.match(out.message ?? "", /includeStreaming/i);
+});
+
+test("an artist with 0 Albums surfaces a hint to pass includeStreaming", async () => {
+  const empty: GroupDef = {
+    title: "Artists",
+    key: "g:artists",
+    items: [item("Helene Fischer", "a:hf")],
+  };
+  // The fake's `item()` doesn't set a subtitle; override to "0 Albums" so the
+  // diagnostic in performSearch fires.
+  empty.items[0]!.subtitle = "0 Albums";
+  const svc = buildService([empty]);
+  const out = await svc.searchMusic({ query: "Helene Fischer", type: "artist" });
+
+  assert.equal(out.candidates[0]?.title, "Helene Fischer");
+  assert.match(out.message ?? "", /no library albums/i);
+  assert.match(out.message ?? "", /includeStreaming/i);
+});
+
+test("streaming-artist results are capped by limit", async () => {
+  const artists: GroupDef = {
+    title: "Artists",
+    key: "g:artists",
+    items: [{ ...item("Tycho", "a:tycho"), subtitle: "0 Albums" }],
+  };
+  const tracks: GroupDef = {
+    title: "Tracks",
+    key: "g:tracks",
+    items: Array.from({ length: 10 }, (_, i) => ({
+      title: `Song ${i}`,
+      item_key: `tk:${i}`,
+      subtitle: "Tycho",
+    })),
+  };
+  const svc = buildService([artists, tracks]);
+  const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true, limit: 3 });
+
+  // 1 library artist + up to 3 streaming tracks. The streaming slice is
+  // capped independently of the library slice (the limit is a per-section
+  // cap on the streaming-track result, mirroring the genre path's per-album
+  // budget).
+  const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
+  assert.ok(streaming.length <= 3, `expected ≤3 streaming candidates, got ${streaming.length}`);
+  assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  assert.equal(out.candidates[0]?.title, "Tycho");
 });
 
 test("limit caps the number of returned candidates", async () => {

@@ -83,13 +83,17 @@ export class RoonMcpServer {
           "appear in Roon's flat search, so the server walks the dedicated Genres " +
           "tree and returns the nearest-match genre nodes (with parent path in the " +
           "subtitle) without broadening; e.g. \"Psychedelic Trance\" yields " +
-          "\"Psytrance\"/\"Trance\". Set includeStreaming:true (only meaningful for " +
-          "type:\"genre\") to also pull a track mix from streaming services " +
-          "(e.g. TIDAL): the server takes the genre-relevant albums and samples " +
-          "tracks across them, so library genre nodes come first and ready-to-play " +
-          "streaming tracks are appended after. Returns opaque, session-scoped item " +
-          "keys for use by the playback tools — pair with get_tracks_for to expand, " +
-          "then play_now or enqueue_and_play.",
+          "\"Psytrance\"/\"Trance\". Set includeStreaming:true (meaningful for " +
+          "type:\"genre\" and type:\"artist\") to also pull a track mix from " +
+          "streaming services (e.g. TIDAL): for a genre the server takes the " +
+          "genre-relevant albums and samples tracks across them; for an artist " +
+          "the server runs a track search and filters to entries by that artist. " +
+          "Library candidates come first, then ready-to-play streaming tracks " +
+          "(each a `track` candidate, source group `Streaming`) appended after. " +
+          "An artist with no library content (e.g. subtitle \"0 Albums\") is " +
+          "reported via the result's `message` so the agent can opt in. Returns " +
+          "opaque, session-scoped item keys for use by the playback tools — pair " +
+          "with get_tracks_for to expand, then play_now or enqueue_and_play.",
         inputSchema: {
           query: z
             .string()
@@ -116,9 +120,11 @@ export class RoonMcpServer {
             .boolean()
             .optional()
             .describe(
-              "Only for type 'genre': also pull a track mix from streaming services " +
-                "(e.g. TIDAL). Library genre nodes come first, then sampled streaming " +
-                "tracks. Default false (library only).",
+              "Meaningful for type 'genre' and type 'artist': also pull a track " +
+                "mix from streaming services (e.g. TIDAL). For a genre, library " +
+                "genre nodes come first, then sampled streaming tracks. For an " +
+                "artist, library candidates come first, then streaming tracks by " +
+                "that artist. Default false (library only).",
             ),
         },
       },
