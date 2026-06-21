@@ -1,10 +1,16 @@
 import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 
+import type { GetZonesBody } from "node-roon-api-transport";
+
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { hierarchyForLocator } from "./locator.js";
 import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
+import {
+  fingerprintFor,
+  ZoneSubscription,
+} from "./ZoneSubscription.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { ZoneService } from "./ZoneService.js";
 import {
@@ -130,6 +136,12 @@ export class PlaybackService {
 
     // 3. Invoke the action against the target zone. Starting new content must
     //    go through a Browse action carrying zone_or_output_id (not Transport).
+    // Capture the pre-action fingerprint so we can wait for Roon to push the
+    // post-action snapshot. Reading `now_playing` immediately after the
+    // browse action would still return the pre-action track (issue #1).
+    const sub = this.roon.getActiveSubscription();
+    const before = await this.captureFingerprint(sub, zoneId);
+
     const result = await this.browse.browse({
       hierarchy,
       item_key: action.item_key!,
@@ -150,7 +162,7 @@ export class PlaybackService {
       }
     }
 
-    const nowPlaying = await this.zones.nowPlayingFor(zoneId).catch(() => undefined);
+    const nowPlaying = await this.readNowPlayingLine(sub, zoneId, before);
 
     return {
       ok: true,
@@ -187,6 +199,12 @@ export class PlaybackService {
       const skipped: Array<{ itemKey: string; reason: string }> = [];
       let queued = 0;
       let index = 0;
+
+      // Capture the pre-action fingerprint so we can wait for Roon to push
+      // the post-action snapshot. Reading `now_playing` immediately after
+      // the browse action would still return the pre-action track (issue #1).
+      const sub = this.roon.getActiveSubscription();
+      const before = await this.captureFingerprint(sub, targetId);
 
       // 1. Start the queue with the first item that can Play Now. If the first
       //    can't play, fall through to the next as the queue starter.
@@ -232,7 +250,7 @@ export class PlaybackService {
         }
       }
 
-      const nowPlaying = await this.zones.nowPlayingFor(targetId).catch(() => undefined);
+      const nowPlaying = await this.readNowPlayingLine(sub, targetId, before);
       const message =
         `Queued ${queued} of ${requested} item(s)` +
         (skipped.length > 0 ? `, skipped ${skipped.length}.` : ".") +
@@ -346,5 +364,62 @@ export class PlaybackService {
         }),
       (applied) => ({ applied }),
     );
+  }
+
+  /**
+   * Snapshot a zone's `(state, title, artist, album)` fingerprint before a
+   * playback action runs, so we can wait for the post-action change. Reads
+   * via the active subscription (or `get_zones` cold-start fallback). Returns
+   * `undefined` when no subscription is active and the zone isn't yet known
+   * — the caller falls back to the legacy immediate read.
+   */
+  private async captureFingerprint(
+    sub: ZoneSubscription | undefined,
+    zoneId: string,
+  ): Promise<ReturnType<typeof fingerprintFor>> {
+    if (!sub) return undefined;
+    const body = await sub.getSnapshot(() => this.coldStartGetZones());
+    return fingerprintFor(body, zoneId);
+  }
+
+  /** One-shot `get_zones` RPC for the cold-start case (no subscription yet). */
+  private coldStartGetZones(): Promise<GetZonesBody> {
+    const transport = this.roon.getTransport();
+    return new Promise<GetZonesBody>((resolve, reject) => {
+      transport.get_zones((err, result) => {
+        if (err) {
+          reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${err}`));
+          return;
+        }
+        resolve(result);
+      });
+    });
+  }
+
+  /**
+   * Read the `now_playing` line for a zone after a playback action, waiting
+   * for the subscription to push a snapshot that reflects the change.
+   * Returns `undefined` when the zone isn't reported (e.g. Core unpaired).
+   */
+  private async readNowPlayingLine(
+    sub: ZoneSubscription | undefined,
+    zoneId: string,
+    before: ReturnType<typeof fingerprintFor>,
+  ): Promise<string | undefined> {
+    try {
+      if (!sub || !before) {
+        return await this.zones.nowPlayingFor(zoneId);
+      }
+      const after = await sub.waitForZoneChange(zoneId, before);
+      const z = (after.zones ?? []).find(
+        (x) =>
+          x.zone_id === zoneId ||
+          (x.outputs ?? []).some((o) => o.output_id === zoneId),
+      );
+      const np = z?.now_playing;
+      return np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1;
+    } catch {
+      return undefined;
+    }
   }
 }

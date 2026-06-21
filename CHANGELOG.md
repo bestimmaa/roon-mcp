@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+### Fixed
+
+- `nowPlaying` returned by `play_now` / `enqueue_and_play` no longer reports
+  the track that was playing *before* the action (issue #1). The server now
+  subscribes to Roon's zone-state stream at startup and waits for the next
+  `Changed` event after a playback action before reading the snapshot, so
+  the response reflects the new track. Falls back to the cached snapshot
+  after a 2 s timeout so a slow Core never delays an MCP call.
+
 ## [0.2.0] - 2026-06-21
 
 ### Added

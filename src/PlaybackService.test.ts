@@ -17,6 +17,7 @@ import { RoonClient } from "./RoonClient.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { RoonMcpError } from "./types.js";
 import { ZoneService } from "./ZoneService.js";
+import { ZoneSubscription } from "./ZoneSubscription.js";
 
 /** A node the play drill lands on: either a child list or a terminal message. */
 type DrillResult = BrowseItem[] | { message: string };
@@ -157,6 +158,7 @@ function build(
     waitForCore: async () => undefined,
     getBrowse: () => browse,
     getTransport: () => transport,
+    getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
   const mgr = new BrowseSessionManager(stub);
   const zones = new ZoneService(stub);
@@ -398,4 +400,82 @@ test("enqueue rejects an unknown zone id with ZONE_NOT_FOUND", async () => {
     svc.enqueueAndPlay({ zoneId: "nope", itemKeys: [loc("t1")] }),
     (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
   );
+});
+
+/**
+ * Subscription-backed playback stub. The pre-loaded snapshot reports the
+ * previous track; the test fires a `Changed` event after the action so the
+ * service reads the new track (not the pre-action one) — issue #1.
+ */
+function buildWithSubscription(): {
+  svc: PlaybackService;
+  push: (response: string, body: unknown) => void;
+} {
+  const browse = new FakeBrowse(
+    { album: [action("Play Now", "act:play")] },
+    new Set(["act:play"]),
+  );
+  const transport = new FakeTransport([ZONE]);
+  let cb: ((response: string, body: unknown) => void) | undefined;
+  const transportWithSub = {
+    ...transport,
+    subscribe_zones: (callback: (response: string, body: unknown) => void) => {
+      cb = callback;
+    },
+  };
+  const sub = new ZoneSubscription(
+    transportWithSub as unknown as ConstructorParameters<typeof ZoneSubscription>[0],
+    "core-1",
+  );
+  sub.start();
+  // Pre-load the cache so the pre-fingerprint read comes from the
+  // subscription, not a cold-start RPC.
+  cb?.("Subscribed", { zones: [ZONE] });
+
+  const stub = {
+    waitForCore: async () => undefined,
+    getBrowse: () => browse,
+    getTransport: () => transport,
+    getActiveSubscription: () => sub,
+  } as unknown as RoonClient;
+  const mgr = new BrowseSessionManager(stub);
+  const zones = new ZoneService(stub);
+  const tracks = new TrackExpansionService(mgr);
+  const svc = new PlaybackService(mgr, zones, stub, tracks);
+  return { svc, push: (r, b) => cb?.(r, b) };
+}
+
+test("play_now returns the new track in nowPlaying (issue #1)", async () => {
+  // Reproduces the bug: the previous test pre-loaded "Some Track" into
+  // ZONE. The subscription will push a Changed event with "Brand New Track"
+  // before the service reads the post-action snapshot. With the wait-for-
+  // change fix, nowPlaying should reflect the new track.
+  const { svc, push } = buildWithSubscription();
+  const newZone: RoonApiZone = {
+    ...ZONE,
+    state: "playing",
+    now_playing: { two_line: { line1: "Brand New Track", line2: "Brand New Artist" } },
+  };
+
+  const out = await Promise.all([
+    svc.playNow({ zoneId: "z1", itemKey: loc("album") }),
+    new Promise<void>((r) =>
+      setTimeout(() => {
+        push("Changed", { zones_changed: [newZone] });
+        r();
+      }, 5),
+    ),
+  ]).then(([res]) => res);
+
+  assert.equal(out.nowPlaying, "Brand New Track");
+});
+
+test("play_now still reports the previous track when no Changed event arrives", async () => {
+  // On a slow Core where the subscription never pushes the new state,
+  // the service should time out and return whatever is in the cache —
+  // matching the legacy "may be stale" behavior. This pins the timeout
+  // fallback so a misbehaving subscription can't hang the call.
+  const { svc } = buildWithSubscription();
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
+  assert.equal(out.nowPlaying, "Some Track");
 });

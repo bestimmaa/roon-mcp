@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { GetZonesBody, RoonApiZone, RoonOutput } from "node-roon-api-transport";
+import type { GetZonesBody, RoonApiTransport, RoonApiZone, RoonOutput } from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
 import { TransportService } from "./TransportService.js";
 import { RoonMcpError, type NowPlayingInfo } from "./types.js";
 import { ZoneService } from "./ZoneService.js";
+import { ZoneSubscription } from "./ZoneSubscription.js";
 
 function zone(partial: Partial<RoonApiZone> & { zone_id: string }): RoonApiZone {
   return {
@@ -75,6 +76,7 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         cb?.(false);
       },
     }),
+    getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
 
   const zoneSvc = new ZoneService(stub, undefined, defaultZone);
@@ -330,4 +332,96 @@ test("mute fans out to every output with the requested how", async () => {
     { outputId: "o1", how: "unmute" },
     { outputId: "o2", how: "unmute" },
   ]);
+});
+
+/**
+ * A subscription-backed transport stub. The `subscribe_zones` callback is
+ * captured so the test can drive `Changed` events. The `get_zones` RPC is
+ * kept so a cold-start fallback still works.
+ */
+function serviceWithSubscription(initial: RoonApiZone[]): {
+  svc: TransportService;
+  controlCalls: RecordedControl[];
+  push: (response: string, body: unknown) => void;
+} {
+  const controlCalls: RecordedControl[] = [];
+  let cb: ((response: string, body: unknown) => void) | undefined;
+  let getZonesCalls = 0;
+
+  const transport = {
+    get_zones: (cb2: (e: string | false, b: GetZonesBody) => void) => {
+      getZonesCalls++;
+      cb2(false, { zones: initial });
+    },
+    subscribe_zones: (callback: (response: string, body: unknown) => void) => {
+      cb = callback;
+    },
+    control: (
+      zoneOrOutput: string,
+      control: string,
+      cb3?: (e: string | false) => void,
+    ) => {
+      controlCalls.push({ zone: zoneOrOutput, control });
+      cb3?.(false);
+    },
+  } as unknown as RoonApiTransport;
+
+  const sub = new ZoneSubscription(transport, "core-1");
+  sub.start();
+  // Pre-load the cache so reads don't hit the cold-start fallback path.
+  cb?.("Subscribed", { zones: initial });
+
+  const stub = {
+    waitForCore: async () => undefined,
+    getTransport: () => transport,
+    getActiveSubscription: () => sub,
+  } as unknown as RoonClient;
+  const zones = new ZoneService(stub);
+  const svc = new TransportService(stub, zones);
+  return { svc, controlCalls, push: (r, b) => cb?.(r, b) };
+}
+
+test("control waits for the post-action snapshot when the subscription pushes a Changed event", async () => {
+  // Reproduces issue #1 for `control_playback`: after `next` the zone's
+  // `state` is still the pre-action one until Roon pushes a Changed event.
+  const { svc, push } = serviceWithSubscription([
+    zone({
+      zone_id: "z1",
+      state: "playing",
+      is_next_allowed: true,
+      now_playing: { two_line: { line1: "Old Track" } },
+    }),
+  ]);
+
+  // Fire the action and the matching Changed event concurrently. The
+  // service should observe the new state when the action resolves.
+  const out = await Promise.all([
+    svc.control("z1", "next"),
+    // Simulate Roon pushing the new track on the next event loop turn.
+    new Promise<void>((r) => setTimeout(() => {
+      push("Changed", {
+        zones_changed: [
+          zone({
+            zone_id: "z1",
+            state: "playing",
+            is_next_allowed: true,
+            now_playing: { two_line: { line1: "New Track" } },
+          }),
+        ],
+      });
+      r();
+    }, 5)),
+  ]).then(([res]) => res);
+
+  assert.equal(out.state, "playing");
+});
+
+test("control falls back to the latest snapshot when no Changed event arrives", async () => {
+  // No subscription pushes anything; the service should still return
+  // promptly with the current snapshot, not hang.
+  const { svc } = serviceWithSubscription([
+    zone({ zone_id: "z1", state: "paused", is_play_allowed: true }),
+  ]);
+  const out = await svc.control("z1", "resume");
+  assert.equal(out.state, "paused");
 });

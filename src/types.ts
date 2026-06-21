@@ -92,7 +92,8 @@ export interface PlaybackResult {
   /** Items started/queued by this call. `play_now` queues exactly one. */
   queued: number;
   skipped: Array<{ itemKey: string; reason: string }>;
-  /** Best-effort "now playing" line read just after the action; may be stale. */
+  /** Current track line read after the action; waits for Roon's next zone
+   * event so it reflects the new track rather than the previous one. */
   nowPlaying?: string;
   message?: string;
 }

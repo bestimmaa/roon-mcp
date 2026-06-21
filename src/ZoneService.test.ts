@@ -24,6 +24,7 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): ZoneService {
       get_zones: (cb: (e: string | false, b: GetZonesBody) => void) => cb(false, { zones }),
       subscribe_zones: () => {},
     }),
+    getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
   return new ZoneService(stub, undefined, defaultZone);
 }
