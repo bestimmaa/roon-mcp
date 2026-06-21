@@ -73,8 +73,12 @@ export class RoonMcpServer {
           "type:\"genre\" is special: genres don't appear in Roon's flat search, so " +
           "the server walks the dedicated Genres tree and returns the nearest-match " +
           "genre nodes (with their parent path in the subtitle) without broadening — " +
-          "e.g. \"Psychedelic Trance\" yields \"Psytrance\"/\"Trance\". Returns opaque, " +
-          "session-scoped item keys for use by playback tools.",
+          "e.g. \"Psychedelic Trance\" yields \"Psytrance\"/\"Trance\". Set " +
+          "includeStreaming:true (only meaningful for type:\"genre\") to also pull a " +
+          "track mix from streaming services (e.g. TIDAL): the server takes the " +
+          "genre-relevant albums and samples tracks across them, so library genre " +
+          "nodes are listed first and ready-to-play streaming tracks appended after. " +
+          "Returns opaque, session-scoped item keys for use by playback tools.",
         inputSchema: {
           query: z.string().min(1).describe("Free-text search, e.g. 'Dark Ambient' or 'Tycho'."),
           type: z
@@ -88,6 +92,14 @@ export class RoonMcpServer {
             .max(50)
             .optional()
             .describe("Max candidates to return (default 10)."),
+          includeStreaming: z
+            .boolean()
+            .optional()
+            .describe(
+              "Also pull a track mix from streaming services. " +
+                "Only applies when type is \"genre\": library genre nodes come first, " +
+                "then tracks sampled across genre-relevant streaming albums. Default false.",
+            ),
         },
       },
       async (args) => {

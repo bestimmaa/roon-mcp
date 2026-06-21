@@ -28,8 +28,8 @@ async function main(): Promise<void> {
   const zones = new ZoneService(roon, logger, defaultZone);
   const browse = new BrowseSessionManager(roon, logger);
   const genres = new GenreService(browse);
-  const search = new SearchService(browse, genres);
   const tracks = new TrackExpansionService(browse);
+  const search = new SearchService(browse, genres, tracks);
   const playback = new PlaybackService(browse, zones, roon, tracks, logger);
   const server = new RoonMcpServer(roon, zones, search, tracks, playback);
 

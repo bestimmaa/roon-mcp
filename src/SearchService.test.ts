@@ -14,6 +14,7 @@ import { GenreService } from "./GenreService.js";
 import { decodeLocator, isGenreLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 
 interface GroupDef {
   title: string;
@@ -35,6 +36,9 @@ class FakeBrowse {
   constructor(
     private readonly groups: GroupDef[],
     private readonly opts: FakeOpts = {},
+    // item_key → child rows, for drilling below the top groups (e.g. an album's
+    // track list). Lets the streaming-genre path expand albums into tracks.
+    private readonly drills: Record<string, BrowseItem[]> = {},
   ) {}
 
   browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
@@ -63,9 +67,16 @@ class FakeBrowse {
     }
     if (o.item_key !== undefined) {
       const g = this.groups.find((x) => x.key === o.item_key);
-      if (!g || g.failDrill) return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
-      this.stack.push(g.items);
-      return cb(false, { action: "list" });
+      if (g && !g.failDrill) {
+        this.stack.push(g.items);
+        return cb(false, { action: "list" });
+      }
+      const drilled = this.drills[o.item_key];
+      if (drilled) {
+        this.stack.push(drilled);
+        return cb(false, { action: "list" });
+      }
+      return cb("InvalidItemKey", undefined as unknown as BrowseResultBody);
     }
     return cb(false, { action: "none" });
   }
@@ -78,15 +89,24 @@ class FakeBrowse {
   }
 }
 
-function buildService(groups: GroupDef[], opts?: FakeOpts): SearchService {
-  const fake = new FakeBrowse(groups, opts);
+function buildService(
+  groups: GroupDef[],
+  opts?: FakeOpts,
+  drills?: Record<string, BrowseItem[]>,
+): SearchService {
+  const fake = new FakeBrowse(groups, opts, drills);
   const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
   const browse = new BrowseSessionManager(stub);
-  return new SearchService(browse, new GenreService(browse));
+  return new SearchService(browse, new GenreService(browse), new TrackExpansionService(browse));
 }
 
 function item(title: string, key: string): BrowseItem {
   return { title, item_key: key, hint: "list" };
+}
+
+/** A track leaf (no "list" hint, so it's a playable row, not a container). */
+function leaf(title: string, key: string): BrowseItem {
+  return { title, item_key: key };
 }
 
 const ARTISTS: GroupDef = {
@@ -147,7 +167,44 @@ test("type:genre is resolved via the genres tree, not broadened to artists", asy
   const out = await svc.searchMusic({ query: "Dark Ambient", type: "genre" });
   assert.equal(out.broadened, false);
   assert.deepEqual(out.candidates, []);
-  assert.match(out.message ?? "", /No genres matched/i);
+  assert.match(out.message ?? "", /No results for/i);
+});
+
+test("includeStreaming samples a track mix across genre-relevant albums", async () => {
+  const albums: GroupDef = {
+    title: "Albums",
+    key: "g:albums",
+    items: [leaf("Selected Ambient Works", "al:saw"), leaf("Ambient Avenue", "al:ave")],
+  };
+  // Each album drills into its own track list.
+  const drills = {
+    "al:saw": [leaf("Xtal", "t:xtal"), leaf("Ageispolis", "t:age")],
+    "al:ave": [leaf("Fire Ant", "t:fire"), leaf("Jealous", "t:jeal")],
+  };
+  const svc = buildService([albums], undefined, drills);
+  const out = await svc.searchMusic({ query: "Ambient", type: "genre", includeStreaming: true });
+
+  // No library genre tree in the fake, so the candidates are purely streaming.
+  assert.ok(out.candidates.length > 0);
+  assert.ok(out.candidates.every((c) => c.type === "track"));
+  assert.ok(out.candidates.every((c) => c.sourceGroup === "Streaming"));
+
+  // The mix spreads across both albums (locator `i` is the album index), not
+  // just the first — that's the whole point versus returning one album.
+  const albumIndices = new Set(
+    out.candidates.map((c) => {
+      const loc = decodeLocator(c.itemKey);
+      assert.ok(loc && !isGenreLocator(loc) && typeof loc.t === "number");
+      return loc.i;
+    }),
+  );
+  assert.ok(albumIndices.size >= 2);
+});
+
+test("includeStreaming is ignored for non-genre searches", async () => {
+  const svc = buildService([ARTISTS]);
+  const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true });
+  assert.ok(out.candidates.every((c) => c.type === "artist"));
 });
 
 test("limit caps the number of returned candidates", async () => {

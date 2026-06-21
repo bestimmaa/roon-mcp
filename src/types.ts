@@ -24,6 +24,8 @@ export interface SearchMusicInput {
   query: string;
   type?: MusicItemType;
   limit?: number;
+  /** When true and type is "genre", also sample a track mix from streaming services (e.g. TIDAL). */
+  includeStreaming?: boolean;
 }
 
 export interface MusicCandidate {

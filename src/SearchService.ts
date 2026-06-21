@@ -4,6 +4,7 @@ import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { encodeLocator } from "./locator.js";
 import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
+import { TrackExpansionService } from "./TrackExpansionService.js";
 import {
   RoonMcpError,
   type MusicCandidate,
@@ -45,6 +46,7 @@ export class SearchService {
   constructor(
     private readonly browse: BrowseSessionManager,
     private readonly genres: GenreService,
+    private readonly tracks: TrackExpansionService,
   ) {}
 
   async searchMusic(input: SearchMusicInput): Promise<SearchMusicOutput> {
@@ -54,7 +56,7 @@ export class SearchService {
     // `genres` hierarchy instead (GenreService), and never silently broaden to
     // artists/albums — that hid the failure before.
     if (input.type === "genre") {
-      return this.searchGenres(input.query, limit);
+      return this.searchGenres(input.query, limit, input.includeStreaming);
     }
 
     // Search builds its own item keys inside performSearch, so a stale-session
@@ -62,15 +64,74 @@ export class SearchService {
     return this.browse.runExclusiveWithRetry(() => this.performSearch(input, limit));
   }
 
-  private async searchGenres(query: string, limit: number): Promise<SearchMusicOutput> {
-    const candidates = await this.genres.searchGenres(query, limit);
+  private async searchGenres(
+    query: string,
+    limit: number,
+    includeStreaming?: boolean,
+  ): Promise<SearchMusicOutput> {
+    const libraryGenres = await this.genres.searchGenres(query, limit);
+
+    let streamingTracks: MusicCandidate[] = [];
+    if (includeStreaming) {
+      streamingTracks = await this.collectStreamingGenreTracks(query, limit);
+    }
+
+    const candidates = [...libraryGenres, ...streamingTracks];
+
     let message: string | undefined;
     if (candidates.length === 0) {
-      message = `No genres matched "${query}".`;
-    } else if ((candidates[0]?.score ?? 0) < 1) {
-      message = `No genre exactly named "${query}"; showing nearest genres.`;
+      message = `No results for "${query}".`;
+    } else if (libraryGenres.length === 0) {
+      message = `No library genres matched "${query}"; showing streaming tracks.`;
+    } else if ((libraryGenres[0]?.score ?? 0) < 1) {
+      const suffix = includeStreaming ? "; also showing streaming tracks" : "";
+      message = `No genre exactly named "${query}"; showing nearest genres${suffix}.`;
     }
     return { query, candidates, broadened: false, message };
+  }
+
+  /**
+   * Genre discovery beyond the library. Roon's flat search is text-based, not
+   * genre-filtered, so a raw "tracks" search for a genre name returns noise
+   * (tracks with the word in their title). Instead we take the genre-relevant
+   * albums the flat search surfaces (album/artist metadata makes those genuinely
+   * on-genre) and sample a few tracks across them — the same spread-across-albums
+   * approach get_tracks_for uses for library genres — yielding a real cross-album
+   * mix rather than whole albums. Each expansion re-navigates the flat search; an
+   * opt-in cost we accept for the streaming path.
+   */
+  private async collectStreamingGenreTracks(
+    query: string,
+    limit: number,
+  ): Promise<MusicCandidate[]> {
+    const albumSearch = await this.browse.runExclusiveWithRetry(() =>
+      this.performSearch({ query, type: "album" }, limit),
+    );
+    const albums = albumSearch.candidates.filter((c) => c.type === "album");
+    if (albums.length === 0) return [];
+
+    // Spread the budget so the mix draws from several albums, not just the first.
+    const perAlbum = Math.max(1, Math.ceil(limit / Math.min(albums.length, limit)));
+
+    const out: MusicCandidate[] = [];
+    for (const album of albums) {
+      if (out.length >= limit) break;
+      const expanded = await this.tracks.getTracksFor({ itemKey: album.itemKey, limit: perAlbum });
+      for (const track of expanded.tracks) {
+        if (out.length >= limit) break;
+        out.push({
+          itemKey: track.itemKey,
+          title: track.title,
+          subtitle: track.artist ?? album.title,
+          type: "track",
+          // Inherit the album's relevance so on-genre albums sort their tracks up.
+          score: album.score,
+          available: track.available,
+          sourceGroup: "Streaming",
+        });
+      }
+    }
+    return out;
   }
 
   private async performSearch(
