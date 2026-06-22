@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+### Fixed
+
+- Pairing state now persists to a stable per-user path
+  (`~/.config/roon-mcp/config.json`, override via `ROON_MCP_CONFIG`) instead of
+  a `config.json` relative to the launch directory (issue #4). An MCP server is
+  started from unpredictable working directories, so the old behavior lost the
+  pairing token on every restart — Roon then registered a fresh "Discovered"
+  extension, and multiple enabled duplicates caused intermittent
+  `NO_CORE_PAIRED` failures on transport calls. The extension now stays
+  authorized across restarts. Existing duplicate "Roon MCP" entries should be
+  removed once in Roon → Settings → Extensions.
+
 ## [0.2.1]
 
 ### Fixed

@@ -40,7 +40,9 @@ Add this to your MCP client config. `npx` fetches the package on first run:
 
 On first launch, open **Roon → Settings → Extensions** and enable **Roon MCP**
 to pair. Pairing status is logged to stderr; stdout is reserved for the MCP
-protocol.
+protocol. The pairing token is persisted to `~/.config/roon-mcp/config.json`
+(override with `ROON_MCP_CONFIG`), so the extension stays authorized across
+restarts rather than appearing as a new "Discovered" entry each time.
 
 ### Global install (optional)
 
@@ -64,6 +66,7 @@ npm install -g roon-mcp
 | Env var | Purpose |
 | --- | --- |
 | `ROON_DEFAULT_ZONE` | Optional fallback target for `play_now` / `enqueue_and_play` when no `zoneId` is given — a zone/output id or a display-name substring. If unset, the server falls back to the only zone, an `Office` zone, or the currently-playing zone; if it still can't decide it returns `ZONE_AMBIGUOUS` so the agent can ask. |
+| `ROON_MCP_CONFIG` | Optional path for the persisted pairing token. A value ending in `.json` is the file itself; anything else is a directory to hold `config.json`. Defaults to `$XDG_CONFIG_HOME/roon-mcp/config.json` (i.e. `~/.config/roon-mcp/config.json`). |
 
 ## Tools
 
