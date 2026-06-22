@@ -93,8 +93,10 @@ npm install -g roon-mcp
 
 - **Core language: English.** Category/action label matching (`Artists`, `Play Now`,
   `Top Tracks`, …) assumes an English Core.
-- **Sources: local library + TIDAL.** What searches surface reflects this; results
-  differ on a local-only Core.
+- **Sources: local library + your configured streaming service.** The server goes
+  through Roon's Browse API, which routes to whatever streaming service you have set
+  up in Roon (Tidal, Qobuz, etc.). Developed and tested against Tidal — other services
+  should work but are untested. Results differ on a local-only Core.
 - **Queue: replace.** `enqueue_and_play` starts a fresh queue rather than adding to
   whatever is already playing.
 - **Curation is agent-side.** Dedupe / cap-per-artist / ordering / trimming stay in the
