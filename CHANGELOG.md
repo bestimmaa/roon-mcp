@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.2.3] - 2026-06-22
+
+### Fixed
+
+- Extension ID updated to `com.bestimmaa.roon-mcp` and website URL corrected
+  to the `bestimmaa` GitHub org. Display version now reads dynamically from
+  `package.json` instead of being hard-coded.
+
 ## [0.2.2] - 2026-06-22
 
 ### Fixed
