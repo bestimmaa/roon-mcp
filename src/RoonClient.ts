@@ -7,6 +7,7 @@ import RoonApiTransport, {
   type RoonApiTransport as RoonTransportService,
 } from "node-roon-api-transport";
 
+import { createConfigStore, resolveConfigPath } from "./configStore.js";
 import { RoonMcpError } from "./types.js";
 import { ZoneSubscription, ZoneSubscriptionRegistry } from "./ZoneSubscription.js";
 
@@ -17,6 +18,13 @@ export interface RoonClientOptions {
   publisher?: string;
   email?: string;
   website?: string;
+  /**
+   * Absolute path to the file that holds Roon pairing state. Defaults to a
+   * stable per-user location (see {@link resolveConfigPath}) so the pairing
+   * token survives restarts instead of re-registering a new extension each
+   * time the working directory changes (issue #4).
+   */
+  configPath?: string;
   /** Optional sink for diagnostics; defaults to stderr so stdout stays MCP-clean. */
   log?: (message: string) => void;
 }
@@ -63,6 +71,19 @@ export class RoonClient {
       core_paired: (core) => this.onCorePaired(core),
       core_unpaired: (core) => this.onCoreUnpaired(core),
     });
+
+    // Persist pairing state to a stable absolute path. node-roon-api's own
+    // save_config/load_config write `config.json` relative to the current
+    // working directory; for an MCP server that CWD is unpredictable, so each
+    // launch would look unpaired and Roon would register a duplicate extension
+    // (issue #4). Overriding the instance methods redirects *all* persistence
+    // (pairing token plus any service settings) to one fixed file, and the
+    // default get/set_persisted_state read these lazily so this is sufficient.
+    const configPath = cfg.configPath ?? resolveConfigPath();
+    const store = createConfigStore(configPath, this.log);
+    this.roon.load_config = ((key: string) => store.load(key)) as RoonApi["load_config"];
+    this.roon.save_config = (key: string, value: unknown) => store.save(key, value);
+    this.log(`pairing state persisted at ${configPath}`);
 
     this.status = new RoonApiStatus(this.roon);
   }
