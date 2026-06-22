@@ -82,63 +82,12 @@ npm install -g roon-mcp
 | `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
 | `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
 
-### Streaming search (genre and artist)
+### Notes
 
-Genres don't appear in Roon's flat search hierarchy, so `search_music({ type: "genre" })`
-is handled specially: the server walks Roon's dedicated **Genres** tree (cached per
-session) and returns the nearest-match genre nodes by fuzzy score, with their parent
-path in the subtitle — e.g. `"Psychedelic Trance"` yields `Psytrance` / `Trance`. It
-never silently broadens to artists/albums. These candidates are **library-scoped**
-(genres present in your collection, including TIDAL albums you've added). Expand one
-with `get_tracks_for` to get a cross-album mix of that genre.
-
-Artist search is library-scoped too: `search_music({ type: "artist" })` returns artists
-present in your collection. When the top-ranked artist has no library content — e.g. a
-node with `subtitle: "0 Albums"` because all albums were removed, or an artist not in
-your library at all but available on TIDAL — the result's `message` field carries a
-hint so the agent can opt in to the streaming path (see below) without having to
-discover the dead end at `get_tracks_for` time.
-
-Pass **`includeStreaming: true`** (meaningful for both `type:"genre"` and
-`type:"artist"`) to also pull a track mix from streaming services for discovery beyond
-your library:
-
-- For `type:"genre"`, the server takes the genre-relevant **albums** the flat search
-  surfaces and samples tracks across them. Library genre nodes come first, then
-  ready-to-play streaming tracks (each a `track` candidate, source group `Streaming`)
-  appended after.
-- For `type:"artist"`, the server runs a track search and filters to entries by that
-  artist (matching the track's subtitle, which Roon uses for the artist on track rows).
-  Library artist candidates come first, then streaming tracks by the same artist
-  appended after. This is the path that unblocks "play/queue multiple *Artist* songs"
-  for an artist with no library content: the streaming tracks are queue-playable
-  directly via `enqueue_and_play`. Results are best-effort — a small fraction may be
-  features or compilations; the agent's per-artist cap / dedupe handles that.
-
-Default is `false` (library only).
-
-> Cost: with `includeStreaming` on, each sampled album/track re-navigates the flat
-> search, so an opt-in streaming search does a handful of extra browse round-trips.
-
-### Now playing & transport
-
-`now_playing({ zoneId? })` returns a structured snapshot (state, title, artist,
-album, seek position) so the agent can confirm what's on and where before
-running a transport verb. The server subscribes to Roon's zone-state stream
-once per paired Core and waits for the next `Changed` event after `play_now`
-/`enqueue_and_play`/`control_playback` — so `nowPlaying` in the response
-reflects the new track rather than the one that was playing before the
-action. The wait times out fast on a slow Core (2 s) and falls back to the
-cached snapshot, so a hung subscription can never delay an MCP call.
-`control_playback` takes one verb at a time
-(`pause`, `resume`, `next`, `previous`, `stop`) — there is no compound
-"pause and skip." For "louder" / "softer" without a number, `set_volume` is
-absolute, so the agent should ask for a target percent or apply a default
-delta; volume isn't reported in `now_playing`. Volume and mute fan out to
-every output in the resolved zone and rescale per output, so a single
-`set_volume({ level: 50 })` works correctly across a grouped zone with mixed
-dB / numeric devices; incremental outputs (IR blasters and the like) are
-reported as `skipped` in the result.
+- **Genre search** fuzzy-matches what you type — "psychedelic trance" will find the right genre even if the name isn't exact. By default results come from your library.
+- **`includeStreaming: true`** (on `type:"genre"` or `type:"artist"`) extends the search to your streaming service, so you can play artists or genres that aren't in your local collection.
+- **After starting playback**, `now_playing` reflects the track that just started, not whatever was playing before.
+- **Volume** is set as a percentage (0–100) and works correctly across grouped zones.
 
 ## Assumptions
 
