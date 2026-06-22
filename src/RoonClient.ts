@@ -10,6 +10,7 @@ import RoonApiTransport, {
 import { createConfigStore, resolveConfigPath } from "./configStore.js";
 import { RoonMcpError } from "./types.js";
 import { ZoneSubscription, ZoneSubscriptionRegistry } from "./ZoneSubscription.js";
+import pkg from "../package.json" with { type: "json" };
 
 export interface RoonClientOptions {
   extensionId?: string;
@@ -30,12 +31,12 @@ export interface RoonClientOptions {
 }
 
 const DEFAULTS = {
-  extensionId: "com.christophhalang.roon-mcp",
+  extensionId: "com.bestimmaa.roon-mcp",
   displayName: "Roon MCP",
-  displayVersion: "0.1.0",
+  displayVersion: pkg.version,
   publisher: "Christoph Halang",
   email: "christoph.halang@gmail.com",
-  website: "https://github.com/christophhalang/roon-mcp",
+  website: "https://github.com/bestimmaa/roon-mcp",
 };
 
 /**
