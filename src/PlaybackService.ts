@@ -85,6 +85,7 @@ export class PlaybackService {
   /** Start a single search candidate playing immediately in the target zone. */
   async playNow(input: PlayNowInput): Promise<PlaybackResult> {
     const shuffle = input.shuffle ?? false;
+    const addToQueue = input.addToQueue ?? false;
     const loc = requireLocator(input.itemKey);
 
     // Resolve the target up front (explicit id, configured default, or
@@ -94,13 +95,13 @@ export class PlaybackService {
 
     return this.browse.runExclusive(async () => {
       try {
-        return await this.performPlayNow(loc, targetId, shuffle);
+        return await this.performPlayNow(loc, targetId, shuffle, addToQueue);
       } catch (err) {
         // Per plan: if action invocation fails, reopen the item and retry once.
         // Re-navigating gives fresh live keys, so the retry is meaningful. (A
         // stale locator surfaces as INVALID_ITEM_KEY and is not retried.)
         if (err instanceof RoonMcpError && err.code === "ACTION_FAILED") {
-          return this.performPlayNow(loc, targetId, shuffle);
+          return this.performPlayNow(loc, targetId, shuffle, addToQueue);
         }
         throw err;
       }
@@ -111,6 +112,7 @@ export class PlaybackService {
     loc: Parameters<SearchNavigator["openItem"]>[0],
     zoneId: string,
     shuffle: boolean,
+    addToQueue: boolean = false,
   ): Promise<PlaybackResult> {
     const hierarchy = hierarchyForLocator(loc);
 
@@ -123,15 +125,45 @@ export class PlaybackService {
       );
     }
 
-    // 2. Discover a play (or shuffle) action among the item's options.
-    const labels = shuffle ? [...SHUFFLE_LABELS, ...PLAY_LABELS] : PLAY_LABELS;
+    // 2. Discover the appropriate action among the item's options.
+    //    When queuing, use "Add to Queue" labels; otherwise look for "Play Now".
+    const labels = addToQueue
+      ? QUEUE_LABELS
+      : shuffle
+        ? [...SHUFFLE_LABELS, ...PLAY_LABELS]
+        : PLAY_LABELS;
     const { action } = await this.findAction(hierarchy, labels);
     if (!action) {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
-        "No play action is available for this item.",
+        addToQueue
+          ? "No queue action is available for this item."
+          : "No play action is available for this item.",
       );
     }
+
+    if (addToQueue) {
+      // Adding to queue does not change what's currently playing, so no
+      // fingerprint tracking is needed.
+      const result = await this.browse.browse({
+        hierarchy,
+        item_key: action.item_key!,
+        zone_or_output_id: zoneId,
+      });
+      if (result.action === "message" && result.is_error) {
+        throw new RoonMcpError("ACTION_FAILED", result.message ?? "Queue action failed.");
+      }
+      const nowPlaying = await this.zones.nowPlayingFor(zoneId);
+      return {
+        ok: true,
+        zoneId,
+        queued: 1,
+        skipped: [],
+        nowPlaying,
+        message: `Added to queue via "${action.title}".`,
+      };
+    }
+
     const usedShuffleAction = normalize(action.title).includes("shuffle");
 
     // 3. Invoke the action against the target zone. Starting new content must

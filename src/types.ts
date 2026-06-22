@@ -76,6 +76,8 @@ export interface PlayNowInput {
   /** Opaque, session-scoped item key from a recent `search_music` result. */
   itemKey: string;
   shuffle?: boolean;
+  /** When true, append to the existing queue instead of replacing it. Default: false (replace). */
+  addToQueue?: boolean;
 }
 
 export interface EnqueueAndPlayInput {

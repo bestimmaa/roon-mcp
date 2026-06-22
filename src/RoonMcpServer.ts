@@ -182,19 +182,21 @@ export class RoonMcpServer {
     this.server.registerTool(
       "play_now",
       {
-        title: "Play an item now in a Roon zone",
+        title: "Play or queue an item in a Roon zone",
         description:
           "Use this when the user wants one specific thing playing right now — " +
           "an album, artist, playlist, genre mix, or single track (e.g. \"play " +
           "Tycho\", \"put on In Rainbows\", \"start some Psytrance in the office\", " +
-          "\"play that track\"). Immediately plays a single search candidate in " +
-          "the target zone and replaces whatever was queued. Pass an itemKey from " +
-          "a recent search_music (or get_tracks_for) result — item keys are " +
-          "session-scoped, so use a fresh one. zoneId is optional: omit it to use " +
-          "ROON_DEFAULT_ZONE, or fall back to the only zone / an \"Office\" zone / " +
-          "the currently-playing zone; if it still can't decide it returns " +
+          "\"play that track\"). By default, immediately starts the item and replaces " +
+          "whatever was queued. Pass addToQueue: true to append it to the existing " +
+          "queue instead (e.g. \"add this album to the queue\", \"queue up Tycho\"). " +
+          "Pass an itemKey from a recent search_music (or get_tracks_for) result — " +
+          "item keys are session-scoped, so use a fresh one. zoneId is optional: omit " +
+          "it to use ROON_DEFAULT_ZONE, or fall back to the only zone / an \"Office\" " +
+          "zone / the currently-playing zone; if it still can't decide it returns " +
           "ZONE_AMBIGUOUS so the agent can ask the user or call list_zones. " +
-          "Optionally shuffle. Returns a PlaybackResult.",
+          "Optionally shuffle (only applies when replacing, not when queuing). " +
+          "Returns a PlaybackResult.",
         inputSchema: {
           zoneId: z
             .string()
@@ -215,7 +217,14 @@ export class RoonMcpServer {
           shuffle: z
             .boolean()
             .optional()
-            .describe("Shuffle the selection when starting playback."),
+            .describe("Shuffle the selection when starting playback (ignored when addToQueue is true)."),
+          addToQueue: z
+            .boolean()
+            .optional()
+            .describe(
+              "When true, append the item to the existing queue instead of replacing it. " +
+                "Default: false (replace and start playing immediately).",
+            ),
         },
       },
       async (args) => {
