@@ -277,6 +277,16 @@ declare module "node-roon-api-transport" {
       cb?: (error: string | false) => void,
     ): void;
     /**
+     * Seek within the current track. `how: "absolute"` seeks to `seconds` (0 =
+     * start); `"relative"` moves by `seconds` (negative skips backward).
+     */
+    seek?(
+      zoneOrOutput: string,
+      how: "absolute" | "relative",
+      seconds: number,
+      cb?: (error: string | false) => void,
+    ): void;
+    /**
      * Change the volume of an output. Grouped zones may have outputs with
      * different volume systems, so callers should issue one call per output.
      */
