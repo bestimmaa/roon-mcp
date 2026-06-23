@@ -157,7 +157,8 @@ export type RoonMcpErrorCode =
   | "NO_PLAYABLE_ITEMS"
   | "NO_PLAY_ACTION"
   | "ACTION_FAILED"
-  | "PARTIAL_QUEUE";
+  | "PARTIAL_QUEUE"
+  | "INTERNAL_ERROR";
 
 export class RoonMcpError extends Error {
   constructor(
