@@ -9,6 +9,7 @@ import { TrackExpansionService } from "./TrackExpansionService.js";
 import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
 import { RoonMcpError } from "./types.js";
+import pkg from "../package.json" with { type: "json" };
 
 const MUSIC_ITEM_TYPES = [
   "artist",
@@ -26,6 +27,8 @@ const MUSIC_ITEM_TYPES = [
  */
 export class RoonMcpServer {
   private readonly server: McpServer;
+  /** MCP server version — tracks the package version (issue #6). */
+  readonly version = pkg.version;
 
   constructor(
     private readonly roon: RoonClient,
@@ -37,7 +40,7 @@ export class RoonMcpServer {
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
-      version: "0.1.0",
+      version: this.version,
     });
     this.registerTools();
   }
