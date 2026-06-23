@@ -298,10 +298,13 @@ export class RoonMcpServer {
           "the kitchen?\", \"who's this?\", \"what's the current track?\", " +
           "\"what song is this?\"). Returns a structured snapshot: zone id and " +
           "name, playback state (playing/paused/loading/stopped), title, " +
-          "artist, album, and the current seek position when available. " +
+          "artist, album, the current seek position, and the zone's " +
+          "`volumePercent` (0–100) and `isMuted` flag when available. " +
           "`title`/`artist`/`album` are undefined when nothing is playing. " +
           "Call this before pause/skip/volume changes when the user hasn't " +
           "named a zone — it confirms where to act and what the state is. " +
+          "For relative \"louder\"/\"softer\" requests, read `volumePercent` " +
+          "here, add/subtract a delta, and pass the result to set_volume. " +
           "zoneId is optional: omit to use ROON_DEFAULT_ZONE, or fall back " +
           "to the only zone / an \"Office\" zone / the currently-playing zone; " +
           "if it still can't decide it returns ZONE_AMBIGUOUS so the agent " +
@@ -387,9 +390,8 @@ export class RoonMcpServer {
           "skipped rather than guessed at. zoneId is optional and resolves " +
           "like now_playing. NOTE on relative changes (\"louder\" / \"softer\" " +
           "without a number): this tool is absolute — read the current " +
-          "state with now_playing isn't enough on its own (volume isn't " +
-          "exposed there), so for relative changes, ask the user for a " +
-          "target percent or apply a reasonable default delta.",
+          "`volumePercent` from now_playing, add/subtract a delta, and pass " +
+          "the result as `level`.",
         inputSchema: {
           zoneId: z
             .string()

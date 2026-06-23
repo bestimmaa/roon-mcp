@@ -370,5 +370,28 @@ function mapNowPlaying(raw: RoonApiZone): NowPlayingInfo {
     imageKey: np?.image_key,
     lengthSec: np?.length,
     seekPositionSec: np?.seek_position,
+    volumePercent: zoneVolumePercent(raw),
+    isMuted: (raw.outputs ?? []).some((o) => o.volume?.is_muted === true),
   };
+}
+
+/**
+ * Volume of the zone's first numeric-range output, rescaled to 0–100 percent
+ * (the inverse of {@link scaleToRange}). Undefined when no output has a usable
+ * min/max/value (e.g. incremental IR controls).
+ */
+function zoneVolumePercent(raw: RoonApiZone): number | undefined {
+  for (const o of raw.outputs ?? []) {
+    const v = o.volume;
+    if (
+      v &&
+      typeof v.min === "number" &&
+      typeof v.max === "number" &&
+      typeof v.value === "number" &&
+      v.max > v.min
+    ) {
+      return Math.round(((v.value - v.min) / (v.max - v.min)) * 100);
+    }
+  }
+  return undefined;
 }
