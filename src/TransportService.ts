@@ -9,14 +9,28 @@ import type {
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { fingerprintFor, ZoneSubscription } from "./ZoneSubscription.js";
-import { RoonMcpError, type NowPlayingInfo, type ZoneState } from "./types.js";
+import {
+  RoonMcpError,
+  type LoopMode,
+  type NowPlayingInfo,
+  type SeekResult,
+  type SetLoopResult,
+  type ZoneState,
+} from "./types.js";
 import { ZoneService } from "./ZoneService.js";
 
 /**
  * Roon `control` verbs accepted by `transport.control(zone, control, cb)`.
  * `resume` is the LLM-friendly verb that maps to Roon's `play`.
  */
-type RoonControlVerb = "play" | "pause" | "next" | "previous" | "stop";
+type RoonControlVerb = "play" | "pause" | "playpause" | "next" | "previous" | "stop";
+
+/** User-friendly loop modes → Roon's native `loop` change_settings values. */
+const LOOP_TO_ROON: Record<LoopMode, "disabled" | "loop" | "loop_one"> = {
+  off: "disabled",
+  all: "loop",
+  one: "loop_one",
+};
 
 /** Result of a transport control call (pause/resume/next/previous/stop). */
 export interface ControlResult {
@@ -91,9 +105,10 @@ export class TransportService {
     const verb = mapControlVerb(action);
 
     // Best-effort precheck: the Core reports is_<verb>_allowed on its zone
-    // state snapshot. `stop` has no corresponding flag and is always allowed.
+    // state snapshot. `stop` and `playpause` have no corresponding flag (the
+    // latter is a toggle Roon accepts in either state) and are always allowed.
     // If the flag is explicitly false, refuse rather than rely on Roon to error.
-    if (verb !== "stop" && raw.state === "playing") {
+    if (verb !== "stop" && verb !== "playpause" && raw.state === "playing") {
       const flag = allowedFlagFor(verb);
       if (raw[flag] === false) {
         throw new RoonMcpError(
@@ -232,6 +247,94 @@ export class TransportService {
     return { ok: true, zoneId: targetId, muted };
   }
 
+  /**
+   * Seek within the current track. `mode: "absolute"` (default) sets the
+   * position to `seconds` (0 = start); `"relative"` moves by `seconds` (negative
+   * skips backward). Refuses up front when the zone reports `is_seek_allowed`
+   * as false.
+   */
+  async seek(
+    zoneId: string | undefined,
+    seconds: number,
+    mode: "absolute" | "relative" = "absolute",
+  ): Promise<SeekResult> {
+    if (!Number.isFinite(seconds) || (mode === "absolute" && seconds < 0)) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `seconds must be a finite non-negative number in absolute mode (got ${seconds}).`,
+      );
+    }
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const raw = await this.findRawZone(targetId);
+    if (!raw) {
+      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
+    }
+    if (raw.is_seek_allowed === false) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Seek is not available on this zone right now.",
+      );
+    }
+
+    const transport = this.roon.getTransport();
+    await this.logger.call(
+      "seek",
+      { zoneId: targetId, how: mode, seconds },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.seek!(targetId, mode, seconds, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `seek failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+      () => ({ seconds }),
+    );
+
+    return { ok: true, zoneId: targetId, mode, seconds };
+  }
+
+  /**
+   * Set the loop/repeat mode for a zone via `change_settings`. Maps the
+   * user-friendly mode to Roon's native `loop` value. Refuses when the
+   * transport doesn't expose `change_settings` (older Cores).
+   */
+  async setLoop(zoneId: string | undefined, mode: LoopMode): Promise<SetLoopResult> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const raw = await this.findRawZone(targetId);
+    if (!raw) {
+      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
+    }
+
+    const transport = this.roon.getTransport();
+    if (typeof transport.change_settings !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Loop/repeat settings are not available on this Core (change_settings unsupported).",
+      );
+    }
+    const roonMode = LOOP_TO_ROON[mode];
+    await this.logger.call(
+      "change_settings",
+      { zoneId: targetId, settings: { loop: roonMode } },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.change_settings!(targetId, { loop: roonMode }, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `change_settings(loop) failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+      () => ({ loop: roonMode }),
+    );
+
+    return { ok: true, zoneId: targetId, mode };
+  }
+
   private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
     const body = await this.getZonesBody();
     return (body.zones ?? []).find(
@@ -284,12 +387,22 @@ export class TransportService {
   }
 }
 
-function isTransportAction(s: string): s is "pause" | "resume" | "next" | "previous" | "stop" {
-  return s === "pause" || s === "resume" || s === "next" || s === "previous" || s === "stop";
+function isTransportAction(s: string): s is "pause" | "resume" | "next" | "previous" | "stop" | "playpause" {
+  return (
+    s === "pause" ||
+    s === "resume" ||
+    s === "next" ||
+    s === "previous" ||
+    s === "stop" ||
+    s === "playpause"
+  );
 }
 
-function mapControlVerb(action: "pause" | "resume" | "next" | "previous" | "stop"): RoonControlVerb {
-  // `resume` reads naturally to a user; Roon's API uses `play` for the same effect.
+function mapControlVerb(
+  action: "pause" | "resume" | "next" | "previous" | "stop" | "playpause",
+): RoonControlVerb {
+  // `resume` reads naturally to a user; Roon's API uses `play` for the same
+  // effect. `playpause` is a native Roon toggle verb and passes through.
   return action === "resume" ? "play" : action;
 }
 
@@ -299,8 +412,10 @@ type ControlAllowedFlag =
   | "is_next_allowed"
   | "is_previous_allowed";
 
-/** Map a non-`stop` Roon control verb to its `is_*_allowed` zone-state flag. */
-function allowedFlagFor(verb: Exclude<RoonControlVerb, "stop">): ControlAllowedFlag {
+/** Map a Roon control verb (one with an `is_*_allowed` flag) to that flag. */
+function allowedFlagFor(
+  verb: Exclude<RoonControlVerb, "stop" | "playpause">,
+): ControlAllowedFlag {
   switch (verb) {
     case "pause":
       return "is_pause_allowed";

@@ -78,7 +78,9 @@ npm install -g roon-mcp
 | `play_now({ zoneId?, itemKey, shuffle?, addToQueue? })` | Play or queue one search candidate. By default replaces the queue and starts immediately. Pass `addToQueue: true` to append to the existing queue instead. `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
 | `now_playing({ zoneId? })` | Snapshot of the zone's current track — state, title, artist, album, seek position. `title`/`artist`/`album` are undefined when nothing is playing. |
-| `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop`. |
+| `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop` / `playpause` (toggle play/pause). |
+| `seek({ zoneId?, seconds, mode? })` | Seek within the current track. `mode:"absolute"` (default) seeks to `seconds` (0 = start); `"relative"` moves by `seconds` (negative skips backward). |
+| `set_loop({ zoneId?, mode })` | Set the loop/repeat mode: `off` / `all` / `one`. |
 | `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
 | `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
 

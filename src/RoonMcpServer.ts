@@ -331,18 +331,20 @@ export class RoonMcpServer {
     this.server.registerTool(
       "control_playback",
       {
-        title: "Run a Roon transport verb (pause/resume/next/previous/stop)",
+        title: "Run a Roon transport verb (pause/resume/next/previous/stop/playpause)",
         description:
           "Use this for the common transport verbs — pause, resume, skip, " +
-          "next track, previous track, stop (e.g. \"pause\", \"pause the " +
-          "kitchen\", \"skip\", \"next track\", \"next song\", \"play the " +
-          "next song\", \"resume\", \"resume in the office\", \"stop\", " +
-          "\"stop the music\"). Runs one transport verb against the resolved " +
-          "zone. For \"louder\"/\"softer\" without a number, call now_playing " +
-          "first to read the current state, then set_volume with a target " +
-          "percent — this tool is verbs only. zoneId is optional and resolves " +
-          "like now_playing. Returns the resolved zoneId, the action taken, " +
-          "and the resulting playback state.",
+          "next track, previous track, stop, or toggle play/pause (e.g. " +
+          "\"pause\", \"pause the kitchen\", \"skip\", \"next track\", \"next " +
+          "song\", \"play the next song\", \"resume\", \"resume in the " +
+          "office\", \"stop\", \"stop the music\", \"play/pause\", \"toggle " +
+          "playback\"). Runs one transport verb against the resolved zone. " +
+          "'playpause' toggles between playing and paused. For \"louder\"/" +
+          "\"softer\" without a number, call now_playing first to read the " +
+          "current state, then set_volume with a target percent — this tool " +
+          "is verbs only. zoneId is optional and resolves like now_playing. " +
+          "Returns the resolved zoneId, the action taken, and the resulting " +
+          "playback state.",
         inputSchema: {
           zoneId: z
             .string()
@@ -353,11 +355,12 @@ export class RoonMcpServer {
                 "ROON_DEFAULT_ZONE or fall back automatically (see now_playing).",
             ),
           action: z
-            .enum(["pause", "resume", "next", "previous", "stop"])
+            .enum(["pause", "resume", "next", "previous", "stop", "playpause"])
             .describe(
               "Transport verb to run: 'pause' to stop playback, 'resume' to " +
                 "restart it, 'next' to skip to the next track, 'previous' to " +
-                "go back, 'stop' to release the audio device.",
+                "go back, 'stop' to release the audio device, 'playpause' to " +
+                "toggle between playing and paused.",
             ),
         },
       },
@@ -446,6 +449,95 @@ export class RoonMcpServer {
       async (args) => {
         try {
           const result = await this.transport.mute(args.zoneId, args.muted);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "seek",
+      {
+        title: "Seek within the current track in a Roon zone",
+        description:
+          "Use this when the user wants to jump to a position in the current " +
+          "track or skip forward/back by a few seconds (e.g. \"skip 30 " +
+          "seconds\", \"jump to 1:30\", \"go back 10 seconds\", \"seek to the " +
+          "beginning\"). In absolute mode (default) `seconds` is the target " +
+          "position (0 = start); in relative mode it is a forward (positive) " +
+          "or backward (negative) delta. Refuses if the zone reports seek is " +
+          "not allowed. zoneId is optional and resolves like now_playing.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          seconds: z
+            .number()
+            .describe(
+              "Target position in seconds (absolute mode, 0 = start) or a " +
+                "delta in seconds (relative mode; negative skips backward).",
+            ),
+          mode: z
+            .enum(["absolute", "relative"])
+            .optional()
+            .describe(
+              "'absolute' (default) seeks to `seconds`; 'relative' moves by " +
+                "`seconds` from the current position.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.transport.seek(
+            args.zoneId,
+            args.seconds,
+            args.mode ?? "absolute",
+          );
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "set_loop",
+      {
+        title: "Set the loop/repeat mode for a Roon zone",
+        description:
+          "Use this when the user wants to repeat or loop playback (e.g. " +
+          "\"repeat\", \"loop this track\", \"repeat all\", \"turn off " +
+          "repeat\", \"loop the album\"). Sets the zone's loop/repeat mode: " +
+          "'off' (no repeat), 'all' (repeat the queue/album), or 'one' " +
+          "(repeat the current track). zoneId is optional and resolves like " +
+          "now_playing. Refuses on Cores whose transport doesn't expose " +
+          "change_settings.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          mode: z
+            .enum(["off", "all", "one"])
+            .describe(
+              "'off' disables repeat, 'all' repeats the queue, 'one' repeats " +
+                "the current track.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.transport.setLoop(args.zoneId, args.mode);
           return structured(result);
         } catch (err) {
           return toToolError(err);

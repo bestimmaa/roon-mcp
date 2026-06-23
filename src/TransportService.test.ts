@@ -31,6 +31,15 @@ interface RecordedMute {
   outputId: string;
   how: "mute" | "unmute";
 }
+interface RecordedSeek {
+  zone: string;
+  how: "absolute" | "relative";
+  seconds: number;
+}
+interface RecordedSettings {
+  zone: string;
+  settings: Record<string, unknown>;
+}
 
 /** Builds a TransportService backed by a stub RoonClient with the given zones. */
 function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
@@ -38,10 +47,14 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   controlCalls: RecordedControl[];
   volumeCalls: RecordedVolume[];
   muteCalls: RecordedMute[];
+  seekCalls: RecordedSeek[];
+  settingsCalls: RecordedSettings[];
 } {
   const controlCalls: RecordedControl[] = [];
   const volumeCalls: RecordedVolume[] = [];
   const muteCalls: RecordedMute[] = [];
+  const seekCalls: RecordedSeek[] = [];
+  const settingsCalls: RecordedSettings[] = [];
 
   const stub = {
     waitForCore: async () => undefined,
@@ -75,13 +88,30 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         muteCalls.push({ outputId, how });
         cb?.(false);
       },
+      seek: (
+        zoneOrOutput: string,
+        how: "absolute" | "relative",
+        seconds: number,
+        cb?: (e: string | false) => void,
+      ) => {
+        seekCalls.push({ zone: zoneOrOutput, how, seconds });
+        cb?.(false);
+      },
+      change_settings: (
+        zoneOrOutput: string,
+        settings: Record<string, unknown>,
+        cb?: (e: string | false) => void,
+      ) => {
+        settingsCalls.push({ zone: zoneOrOutput, settings });
+        cb?.(false);
+      },
     }),
     getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
 
   const zoneSvc = new ZoneService(stub, undefined, defaultZone);
   const svc = new TransportService(stub, zoneSvc);
-  return { svc, controlCalls, volumeCalls, muteCalls };
+  return { svc, controlCalls, volumeCalls, muteCalls, seekCalls, settingsCalls };
 }
 
 test("getNowPlaying returns a structured snapshot of a playing zone", async () => {
@@ -332,6 +362,68 @@ test("mute fans out to every output with the requested how", async () => {
     { outputId: "o1", how: "unmute" },
     { outputId: "o2", how: "unmute" },
   ]);
+});
+
+test("control('playpause') issues the native playpause verb (issue #17)", async () => {
+  const { svc, controlCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing" }),
+  ]);
+  const out = await svc.control("z1", "playpause");
+  assert.equal(out.ok, true);
+  assert.equal(out.action, "playpause");
+  // playpause is exempt from the allowed-flag precheck (it's a toggle), so it
+  // must pass through without consulting is_play_allowed/is_pause_allowed.
+  assert.deepEqual(controlCalls, [{ zone: "z1", control: "playpause" }]);
+});
+
+test("seek issues an absolute seek to the target position (issue #17)", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: true }),
+  ]);
+  const out = await svc.seek("z1", 90);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", mode: "absolute", seconds: 90 });
+  assert.deepEqual(seekCalls, [{ zone: "z1", how: "absolute", seconds: 90 }]);
+});
+
+test("seek in relative mode moves by a signed delta (issue #17)", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: true }),
+  ]);
+  await svc.seek("z1", -10, "relative");
+  assert.deepEqual(seekCalls, [{ zone: "z1", how: "relative", seconds: -10 }]);
+});
+
+test("seek is refused when is_seek_allowed is false", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: false }),
+  ]);
+  await assert.rejects(
+    svc.seek("z1", 0),
+    (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+  );
+  assert.deepEqual(seekCalls, []);
+});
+
+test("seek rejects a negative absolute position", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1", state: "playing" })]);
+  await assert.rejects(
+    svc.seek("z1", -5),
+    (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+  );
+});
+
+test("setLoop maps each mode to Roon's native loop value (issue #17)", async () => {
+  const cases: Array<{ mode: "off" | "all" | "one"; roon: string }> = [
+    { mode: "off", roon: "disabled" },
+    { mode: "all", roon: "loop" },
+    { mode: "one", roon: "loop_one" },
+  ];
+  for (const { mode, roon } of cases) {
+    const { svc, settingsCalls } = serviceWith([zone({ zone_id: "z1" })]);
+    const out = await svc.setLoop("z1", mode);
+    assert.deepEqual(out, { ok: true, zoneId: "z1", mode });
+    assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { loop: roon } }]);
+  }
 });
 
 /**

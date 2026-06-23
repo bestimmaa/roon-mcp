@@ -106,12 +106,55 @@ export interface EnqueueAndPlayOutput extends PlaybackResult {
 }
 
 /** Verb for the `control_playback` tool. `resume` maps to Roon's `play`. */
-export type TransportAction = "pause" | "resume" | "next" | "previous" | "stop";
+export type TransportAction =
+  | "pause"
+  | "resume"
+  | "next"
+  | "previous"
+  | "stop"
+  | "playpause";
 
 export interface ControlPlaybackInput {
   /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
   zoneId?: string;
   action: TransportAction;
+}
+
+export interface SeekInput {
+  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
+  zoneId?: string;
+  /**
+   * Target seek position in seconds. In `absolute` mode this is the position
+   * to seek to (0 = start); in `relative` mode it is a forward/backward delta
+   * (negative skips backward).
+   */
+  seconds: number;
+  /** `absolute` (default) sets the position; `relative` moves by a delta. */
+  mode?: "absolute" | "relative";
+}
+
+export interface SeekResult {
+  ok: true;
+  zoneId: string;
+  /** The mode actually applied. */
+  mode: "absolute" | "relative";
+  /** The requested position/delta (echoed for caller convenience). */
+  seconds: number;
+}
+
+/** Loop/repeat mode for the `set_loop` tool. */
+export type LoopMode = "off" | "all" | "one";
+
+export interface SetLoopInput {
+  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
+  zoneId?: string;
+  mode: LoopMode;
+}
+
+export interface SetLoopResult {
+  ok: true;
+  zoneId: string;
+  mode: LoopMode;
 }
 
 export interface SetVolumeInput {
