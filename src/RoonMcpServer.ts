@@ -568,8 +568,12 @@ function structured(payload: unknown) {
   };
 }
 
-function toToolError(err: unknown) {
-  const code = err instanceof RoonMcpError ? err.code : "BROWSE_FAILED";
+export function toToolError(err: unknown) {
+  // Unexpected (non-RoonMcpError) errors are genuine internal failures — a bug
+  // or an unhandled Roon transport error — not browse failures. Label them
+  // INTERNAL_ERROR so the agent doesn't misread them as retryable browse
+  // problems (issue #13).
+  const code = err instanceof RoonMcpError ? err.code : "INTERNAL_ERROR";
   const message = err instanceof Error ? err.message : String(err);
   return {
     isError: true as const,
