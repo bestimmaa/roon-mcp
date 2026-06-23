@@ -41,6 +41,16 @@ function groupTitleToType(title: string): MusicItemType {
   return GROUP_TITLE_TO_TYPE[cleaned] ?? "unknown";
 }
 
+/**
+ * Strip a trailing result count while preserving case, e.g. "Artists (12)" →
+ * "Artists". Used for `sourceGroup` so library candidates carry a clean label
+ * like "Streaming"/"Genres" do, instead of the raw "(12)"-suffixed title
+ * (issue #12).
+ */
+function cleanGroupTitle(title: string): string {
+  return title.replace(/\s*\(\d+\)\s*$/, "").trim();
+}
+
 /** Turns a text query into ranked browse candidates via the search hierarchy. */
 export class SearchService {
   constructor(
@@ -309,7 +319,7 @@ export class SearchService {
             type,
             score: 0,
             available: true,
-            sourceGroup: group.title,
+            sourceGroup: cleanGroupTitle(group.title),
           });
         });
         // item_keys are level-scoped: pop back to the group list before the
