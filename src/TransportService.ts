@@ -90,6 +90,14 @@ export class TransportService {
     }
     const verb = mapControlVerb(action);
 
+    // `resume` on a zone that's already playing is a no-op, not an error: Roon
+    // reports is_play_allowed === false while playing, so the precheck below
+    // would otherwise refuse it. Skip the transport call and return the current
+    // state (issue #7).
+    if (verb === "play" && raw.state === "playing") {
+      return { ok: true, zoneId: targetId, action, state: mapState(raw.state) };
+    }
+
     // Best-effort precheck: the Core reports is_<verb>_allowed on its zone
     // state snapshot. `stop` has no corresponding flag and is always allowed.
     // If the flag is explicitly false, refuse rather than rely on Roon to error.
