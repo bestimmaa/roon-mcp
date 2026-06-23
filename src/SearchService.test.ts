@@ -287,6 +287,21 @@ test("streaming-artist results are capped by limit", async () => {
   assert.equal(out.candidates[0]?.title, "Tycho");
 });
 
+test("library candidate sourceGroup strips the result count (issue #12)", async () => {
+  // Roon titles search groups with a trailing count, e.g. "Artists (12)".
+  // sourceGroup should carry the clean label ("Artists"), matching the
+  // "Streaming"/"Genres" labels rather than the raw "(12)"-suffixed title.
+  const artists: GroupDef = {
+    title: "Artists (12)",
+    key: "g:artists",
+    items: [item("Tycho", "a:tycho")],
+  };
+  const svc = buildService([artists]);
+  const out = await svc.searchMusic({ query: "Tycho" });
+  assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  assert.equal(out.candidates[0]?.type, "artist");
+});
+
 test("limit caps the number of returned candidates", async () => {
   const many: GroupDef = {
     title: "Tracks",
