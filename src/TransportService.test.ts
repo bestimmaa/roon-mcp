@@ -237,6 +237,32 @@ test("getNowPlaying rejects an unknown zone id with ZONE_NOT_FOUND", async () =>
   );
 });
 
+test("getNowPlaying throws ZONE_NOT_FOUND (not undefined) if the zone vanishes mid-call (issue #9)", async () => {
+  // Simulate the race: `resolveTarget` reads the zone on the first get_zones
+  // call, then the zone is gone by the time getNowPlaying re-reads it. The
+  // tool layer must never serialize an `undefined` payload.
+  const z = zone({ zone_id: "z1", state: "playing", now_playing: { one_line: { line1: "X" } } });
+  let calls = 0;
+  const stub = {
+    waitForCore: async () => undefined,
+    getTransport: () => ({
+      get_zones: (cb: (e: string | false, b: GetZonesBody) => void) => {
+        calls++;
+        cb(false, { zones: calls === 1 ? [z] : [] });
+      },
+      subscribe_zones: () => {},
+    }),
+    getActiveSubscription: () => undefined,
+  } as unknown as RoonClient;
+  const zoneSvc = new ZoneService(stub);
+  const svc = new TransportService(stub, zoneSvc);
+
+  await assert.rejects(
+    svc.getNowPlaying("z1"),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
+  );
+});
+
 test("control rejects an unknown action with BROWSE_FAILED", async () => {
   const { svc } = serviceWith([zone({ zone_id: "z1", state: "playing" })]);
   await assert.rejects(

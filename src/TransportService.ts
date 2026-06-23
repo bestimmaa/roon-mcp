@@ -78,14 +78,20 @@ export class TransportService {
   /**
    * Return a structured snapshot of a zone's current playback. The snapshot
    * is always returned for a resolved zone; `title`/`artist`/`album` are
-   * `undefined` when nothing is playing. Throws on a missing zone id or
-   * ambiguous resolution, so callers can distinguish "no track" (snapshot
-   * with `title: undefined`) from "no such zone" (`ZONE_NOT_FOUND`).
+   * `undefined` when nothing is playing. Throws `ZONE_NOT_FOUND` on a missing
+   * or ambiguous zone, so callers can distinguish "no track" (snapshot with
+   * `title: undefined`) from "no such zone" (`ZONE_NOT_FOUND`) — and the tool
+   * layer never has to serialize an `undefined` payload (issue #9).
    */
-  async getNowPlaying(zoneId?: string): Promise<NowPlayingInfo | undefined> {
+  async getNowPlaying(zoneId?: string): Promise<NowPlayingInfo> {
     const { targetId } = await this.zones.resolveTarget(zoneId);
     const raw = await this.findRawZone(targetId);
-    if (!raw) return undefined;
+    if (!raw) {
+      throw new RoonMcpError(
+        "ZONE_NOT_FOUND",
+        `Zone "${targetId}" is no longer available.`,
+      );
+    }
     return mapNowPlaying(raw);
   }
 
