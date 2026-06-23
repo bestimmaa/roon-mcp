@@ -418,6 +418,37 @@ test("setVolume throws when every output is incremental", async () => {
   );
 });
 
+test("setVolume targets only the named output, not the whole group (issue #14)", async () => {
+  // Passing an output id must change just that output — fanning out across the
+  // grouped zone would silently change the other speaker too.
+  const { svc, volumeCalls } = serviceWith([
+    zone({
+      zone_id: "z1",
+      outputs: [
+        { output_id: "o1", zone_id: "z1", display_name: "L", volume: { min: 0, max: 100 } },
+        { output_id: "o2", zone_id: "z1", display_name: "R", volume: { min: 0, max: 100 } },
+      ],
+    }),
+  ]);
+  const out = await svc.setVolume("o2", 40);
+  assert.deepEqual(out.applied, ["o2"]);
+  assert.deepEqual(volumeCalls, [{ outputId: "o2", how: "absolute", value: 40 }]);
+});
+
+test("mute targets only the named output, not the whole group (issue #14)", async () => {
+  const { svc, muteCalls } = serviceWith([
+    zone({
+      zone_id: "z1",
+      outputs: [
+        { output_id: "o1", zone_id: "z1", display_name: "L" },
+        { output_id: "o2", zone_id: "z1", display_name: "R" },
+      ],
+    }),
+  ]);
+  await svc.mute("o1", true);
+  assert.deepEqual(muteCalls, [{ outputId: "o1", how: "mute" }]);
+});
+
 test("mute fans out to every output with the requested how", async () => {
   const { svc, muteCalls } = serviceWith([
     zone({

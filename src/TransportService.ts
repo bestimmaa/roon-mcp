@@ -194,7 +194,10 @@ export class TransportService {
     const applied: string[] = [];
     const skipped: string[] = [];
 
-    for (const output of raw.outputs ?? []) {
+    // When the caller targeted a specific output (targetId is an output id, not
+    // the zone id), restrict to that output — otherwise setting volume on one
+    // member of a grouped zone would change every output in the group (#14).
+    for (const output of targetOutputs(raw, targetId)) {
       const v = output.volume;
       if (!v || !hasNumericRange(v)) {
         skipped.push(output.output_id);
@@ -241,7 +244,9 @@ export class TransportService {
 
     const transport = this.roon.getTransport();
     const how = muted ? "mute" : "unmute";
-    for (const output of raw.outputs ?? []) {
+    // Restrict to the named output when an output id was targeted (issue #14);
+    // otherwise mute/unmute every output in the zone.
+    for (const output of targetOutputs(raw, targetId)) {
       await this.logger.call(
         "mute",
         { outputId: output.output_id, how },
@@ -467,6 +472,18 @@ function scaleToRange(percent: number, v: NumericVolume): number {
     return Math.round(raw / v.step) * v.step;
   }
   return raw;
+}
+
+/**
+ * The outputs a volume/mute operation should touch. When the caller targeted a
+ * specific output (targetId is an output id, not the zone id), return only
+ * that output so a grouped zone isn't changed wholesale (issue #14). Otherwise
+ * return every output in the zone.
+ */
+function targetOutputs(raw: RoonApiZone, targetId: string): RoonOutput[] {
+  const outputs = raw.outputs ?? [];
+  if (raw.zone_id === targetId) return outputs;
+  return outputs.filter((o) => o.output_id === targetId);
 }
 
 function mapState(state: RoonZoneState | undefined): ZoneState {
