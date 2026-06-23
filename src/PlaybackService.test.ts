@@ -394,6 +394,29 @@ test("enqueue leaves the zone's shuffle setting untouched when shuffle is omitte
   assert.deepEqual(transport.shuffleCalls, []);
 });
 
+test("enqueue with shuffle:false stays silent when change_settings is unavailable (issue #11)", async () => {
+  // A queue built in order is already unshuffled; an unavailable change_settings
+  // (old transport) must not append a noisy "could not be applied" warning.
+  const transport = new FakeTransport([ZONE], false);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")], shuffle: false });
+  assert.equal(out.ok, true);
+  assert.deepEqual(transport.shuffleCalls, []);
+  assert.doesNotMatch(out.message ?? "", /could not be applied/i);
+});
+
+test("enqueue with shuffle:true still warns when change_settings is unavailable", async () => {
+  // The silent path is only for shuffle:false — actively requested shuffle
+  // that can't be applied must still be reported.
+  const transport = new FakeTransport([ZONE], false);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")], shuffle: true });
+  assert.equal(out.ok, true);
+  assert.match(out.message ?? "", /could not be applied/i);
+});
+
 test("enqueue rejects an unknown zone id with ZONE_NOT_FOUND", async () => {
   const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"]);
   await assert.rejects(

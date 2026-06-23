@@ -273,12 +273,15 @@ export class PlaybackService {
       }
 
       // 3. Apply shuffle only when explicitly requested (leave the zone's
-      //    setting untouched otherwise). Best-effort via Transport.
+      //    setting untouched otherwise). Best-effort via Transport. Only warn
+      //    when shuffle-on was requested and couldn't be applied; shuffle-off
+      //    failing is silent — a queue built in order is already unshuffled,
+      //    and an unavailable change_settings is the common cause (issue #11).
       let shuffleNote: string | undefined;
       if (input.shuffle !== undefined) {
         const applied = await this.trySetShuffle(targetId, input.shuffle);
-        if (!applied) {
-          shuffleNote = ` Shuffle ${input.shuffle ? "on" : "off"} could not be applied (Transport setting unavailable).`;
+        if (!applied && input.shuffle) {
+          shuffleNote = " Shuffle was requested but could not be applied (Transport setting unavailable).";
         }
       }
 
