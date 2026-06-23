@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createStderrLogger, silentLogger } from "./logger.js";
+import { createStderrLogger, redirectConsoleToStderr, silentLogger } from "./logger.js";
 
 function captureLogger() {
   const lines: string[] = [];
@@ -68,4 +68,21 @@ test("silentLogger runs the call but emits nothing", async () => {
   });
   assert.equal(ran, true);
   assert.equal(out, 7);
+});
+
+test("redirectConsoleToStderr routes console.error (and friends) to the sink (issue #15)", () => {
+  const lines: string[] = [];
+  const restore = redirectConsoleToStderr((l) => lines.push(l));
+  try {
+    console.error("kaboom", 42);
+    console.log("hello");
+    assert.ok(lines.some((l) => l === "kaboom 42\n"), `error line missing: ${JSON.stringify(lines)}`);
+    assert.ok(lines.some((l) => l === "hello\n"), `log line missing: ${JSON.stringify(lines)}`);
+  } finally {
+    restore();
+  }
+  // After restore the originals are back, so a real write doesn't hit the sink.
+  const before = lines.length;
+  console.log("nope");
+  assert.equal(lines.length, before);
 });
