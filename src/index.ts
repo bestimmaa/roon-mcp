@@ -8,15 +8,12 @@ import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
-import { createStderrLogger } from "./logger.js";
+import { createStderrLogger, redirectConsoleToStderr } from "./logger.js";
 
 // node-roon-api logs discovery chatter via console.log. On a stdio MCP server
-// stdout is reserved for JSON-RPC, so route all console output to stderr.
-for (const method of ["log", "info", "debug", "warn"] as const) {
-  console[method] = (...args: unknown[]) => {
-    process.stderr.write(`${args.map(String).join(" ")}\n`);
-  };
-}
+// stdout is reserved for JSON-RPC, so route all console output — including
+// console.error — to stderr.
+redirectConsoleToStderr();
 
 async function main(): Promise<void> {
   // One structured logger shared across services; emits [roon-call] lines to
