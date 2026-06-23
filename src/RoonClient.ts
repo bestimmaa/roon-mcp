@@ -56,7 +56,10 @@ export class RoonClient {
   private readonly zones = new ZoneSubscriptionRegistry();
 
   private core: RoonCore | undefined;
-  private readonly coreWaiters: Array<(core: RoonCore) => void> = [];
+  private readonly coreWaiters: Array<{
+    resolve: (core: RoonCore) => void;
+    reject: (err: unknown) => void;
+  }> = [];
 
   constructor(options: RoonClientOptions = {}) {
     const cfg = { ...DEFAULTS, ...options };
@@ -101,10 +104,13 @@ export class RoonClient {
   }
 
   stop(): void {
-    // node-roon-api has no clean teardown; drop references and reject waiters.
+    // node-roon-api has no clean teardown; drop references and reject waiters
+    // so a pending waitForCore doesn't hang until its timeout during shutdown.
     if (this.core) this.zones.stopFor(this.core.core_id);
     this.core = undefined;
-    this.coreWaiters.length = 0;
+    this.rejectWaiters(
+      new RoonMcpError("NO_CORE_PAIRED", "Roon MCP is shutting down."),
+    );
   }
 
   isPaired(): boolean {
@@ -116,8 +122,21 @@ export class RoonClient {
     if (this.core) return Promise.resolve(this.core);
 
     return new Promise<RoonCore>((resolve, reject) => {
+      // Wrap resolve/reject so the timer is cleared whichever path fires first:
+      // paired, unpaired (rejected), or timeout. The wrapper is what we register
+      // so onCorePaired/onCoreUnpaired/stop all clear the same timer.
+      const waiter = {
+        resolve: (core: RoonCore) => {
+          clearTimeout(timer);
+          resolve(core);
+        },
+        reject: (err: unknown) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      };
       const timer = setTimeout(() => {
-        const idx = this.coreWaiters.indexOf(onPaired);
+        const idx = this.coreWaiters.indexOf(waiter);
         if (idx >= 0) this.coreWaiters.splice(idx, 1);
         reject(
           new RoonMcpError(
@@ -127,13 +146,14 @@ export class RoonClient {
           ),
         );
       }, timeoutMs);
-
-      const onPaired = (core: RoonCore) => {
-        clearTimeout(timer);
-        resolve(core);
-      };
-      this.coreWaiters.push(onPaired);
+      this.coreWaiters.push(waiter);
     });
+  }
+
+  /** Reject and clear every pending waitForCore waiter with `err`. */
+  private rejectWaiters(err: unknown): void {
+    const waiters = this.coreWaiters.splice(0, this.coreWaiters.length);
+    for (const w of waiters) w.reject(err);
   }
 
   /** Transport service of the currently paired Core. Throws if unpaired. */
@@ -183,7 +203,7 @@ export class RoonClient {
     this.zones.startFor(core.core_id, transport);
 
     const waiters = this.coreWaiters.splice(0, this.coreWaiters.length);
-    for (const waiter of waiters) waiter(core);
+    for (const waiter of waiters) waiter.resolve(core);
   }
 
   private onCoreUnpaired(core: RoonCore): void {
@@ -191,5 +211,13 @@ export class RoonClient {
     this.zones.stopFor(core.core_id);
     if (this.core?.core_id === core.core_id) this.core = undefined;
     this.status.set_status("Waiting for Roon Core…", false);
+    // A pending waitForCore must not hang until its timeout fires once the Core
+    // it was waiting for has unpaired — reject it now (issue #16).
+    this.rejectWaiters(
+      new RoonMcpError(
+        "NO_CORE_PAIRED",
+        `The Roon Core "${core.display_name}" unpaired while waiting for it.`,
+      ),
+    );
   }
 }
