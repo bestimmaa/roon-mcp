@@ -70,7 +70,11 @@ export class SearchService {
     // library results first, streaming tracks appended with sourceGroup
     // "Streaming". See collectStreamingArtistTracks.
     if (input.type === "artist" && input.includeStreaming) {
-      const streaming = await this.collectStreamingArtistTracks(input.query, limit);
+      // Budget streaming against the overall limit so the combined result never
+      // exceeds `limit` (issue #8): library candidates first, then as many
+      // streaming tracks as the remaining budget allows.
+      const budget = Math.max(0, limit - library.candidates.length);
+      const streaming = budget > 0 ? await this.collectStreamingArtistTracks(input.query, budget) : [];
       if (streaming.length > 0) {
         const candidates = [...library.candidates, ...streaming];
         const message = library.message
@@ -92,7 +96,13 @@ export class SearchService {
 
     let streamingTracks: MusicCandidate[] = [];
     if (includeStreaming) {
-      streamingTracks = await this.collectStreamingGenreTracks(query, limit);
+      // Budget streaming against the overall limit so the combined result
+      // never exceeds `limit` (issue #8): library genres first, then as many
+      // streaming tracks as the remaining budget allows.
+      const budget = Math.max(0, limit - libraryGenres.length);
+      if (budget > 0) {
+        streamingTracks = await this.collectStreamingGenreTracks(query, budget);
+      }
     }
 
     const candidates = [...libraryGenres, ...streamingTracks];
