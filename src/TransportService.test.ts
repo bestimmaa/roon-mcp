@@ -140,7 +140,47 @@ test("getNowPlaying returns a structured snapshot of a playing zone", async () =
     imageKey: "img:1",
     lengthSec: 240,
     seekPositionSec: 42,
+    volumePercent: undefined,
+    isMuted: false,
   } satisfies NowPlayingInfo);
+});
+
+test("getNowPlaying exposes volume percent and mute state (issue #10)", async () => {
+  // Output with a 0–60 range at value 30 → 50%; muted.
+  const { svc } = serviceWith([
+    zone({
+      zone_id: "z1",
+      state: "playing",
+      now_playing: { one_line: { line1: "X" } },
+      outputs: [
+        {
+          output_id: "o1",
+          zone_id: "z1",
+          display_name: "Office",
+          volume: { min: 0, max: 60, value: 30, is_muted: true },
+        },
+      ],
+    }),
+  ]);
+  const info = await svc.getNowPlaying();
+  assert.equal(info?.volumePercent, 50);
+  assert.equal(info?.isMuted, true);
+
+  // A grouped zone reports muted if any output is muted, and the first
+  // numeric-range output's percent.
+  const { svc: svc2 } = serviceWith([
+    zone({
+      zone_id: "z2",
+      state: "playing",
+      outputs: [
+        { output_id: "o1", zone_id: "z2", display_name: "L", volume: { min: 0, max: 100, value: 25, is_muted: false } },
+        { output_id: "o2", zone_id: "z2", display_name: "R", volume: { type: "incremental", is_muted: true } },
+      ],
+    }),
+  ]);
+  const info2 = await svc2.getNowPlaying();
+  assert.equal(info2?.volumePercent, 25);
+  assert.equal(info2?.isMuted, true);
 });
 
 test("getNowPlaying falls back through three/two/one line displays", async () => {
@@ -162,6 +202,8 @@ test("getNowPlaying falls back through three/two/one line displays", async () =>
     imageKey: undefined,
     lengthSec: undefined,
     seekPositionSec: undefined,
+    volumePercent: undefined,
+    isMuted: false,
   } satisfies NowPlayingInfo);
 
   // One-line only — both `artist` and `album` should be undefined.

@@ -188,6 +188,15 @@ export interface NowPlayingInfo {
   imageKey?: string;
   lengthSec?: number;
   seekPositionSec?: number;
+  /**
+   * Current volume of the zone's first numeric-range output as a 0–100
+   * percent (the inverse of `set_volume`'s scaling). Undefined when no output
+   * exposes a numeric range (e.g. IR blasters). Exposed so the agent can serve
+   * relative "louder"/"softer" requests (issue #10).
+   */
+  volumePercent?: number;
+  /** True when any output in the zone is muted. */
+  isMuted?: boolean;
 }
 
 export type RoonMcpErrorCode =
