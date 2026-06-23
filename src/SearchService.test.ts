@@ -259,7 +259,7 @@ test("an artist with 0 Albums surfaces a hint to pass includeStreaming", async (
   assert.match(out.message ?? "", /includeStreaming/i);
 });
 
-test("streaming-artist results are capped by limit", async () => {
+test("streaming-artist results are budgeted against limit so the total never exceeds it (issue #8)", async () => {
   const artists: GroupDef = {
     title: "Artists",
     key: "g:artists",
@@ -277,14 +277,30 @@ test("streaming-artist results are capped by limit", async () => {
   const svc = buildService([artists, tracks]);
   const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true, limit: 3 });
 
-  // 1 library artist + up to 3 streaming tracks. The streaming slice is
-  // capped independently of the library slice (the limit is a per-section
-  // cap on the streaming-track result, mirroring the genre path's per-album
-  // budget).
+  // 1 library artist + a streaming budget of (limit - 1) = 2 streaming tracks.
+  // The combined result must respect `limit`, not return up to 2×limit.
   const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
-  assert.ok(streaming.length <= 3, `expected ≤3 streaming candidates, got ${streaming.length}`);
+  assert.equal(streaming.length, 2);
+  assert.ok(out.candidates.length <= 3, `expected ≤3 total candidates, got ${out.candidates.length}`);
   assert.equal(out.candidates[0]?.sourceGroup, "Artists");
   assert.equal(out.candidates[0]?.title, "Tycho");
+});
+
+test("streaming-genre results are budgeted against limit so the total never exceeds it (issue #8)", async () => {
+  // No library genre tree → libraryGenres is empty, so the full `limit` is the
+  // streaming budget and the result must not exceed it.
+  const albums: GroupDef = {
+    title: "Albums",
+    key: "g:albums",
+    items: Array.from({ length: 5 }, (_, i) => leaf(`Album ${i}`, `al:${i}`)),
+  };
+  const drills: Record<string, BrowseItem[]> = {};
+  for (let i = 0; i < 5; i++) {
+    drills[`al:${i}`] = Array.from({ length: 5 }, (_, t) => leaf(`Track ${i}-${t}`, `t:${i}-${t}`));
+  }
+  const svc = buildService([albums], undefined, drills);
+  const out = await svc.searchMusic({ query: "Album", type: "genre", includeStreaming: true, limit: 4 });
+  assert.ok(out.candidates.length <= 4, `expected ≤4 total candidates, got ${out.candidates.length}`);
 });
 
 test("limit caps the number of returned candidates", async () => {
