@@ -290,6 +290,20 @@ test("control('resume') maps to Roon's 'play' verb", async () => {
   assert.deepEqual(controlCalls, [{ zone: "z1", control: "play" }]);
 });
 
+test("control('resume') on an already-playing zone is a no-op success (issue #7)", async () => {
+  // Roon reports is_play_allowed === false while playing; resume should be a
+  // no-op rather than "Action resume is not available".
+  const { svc, controlCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_play_allowed: false }),
+  ]);
+  const out = await svc.control("z1", "resume");
+  assert.equal(out.ok, true);
+  assert.equal(out.action, "resume");
+  assert.equal(out.state, "playing");
+  // No transport call issued — nothing to resume.
+  assert.deepEqual(controlCalls, []);
+});
+
 test("control('next') is refused when is_next_allowed is false", async () => {
   const { svc, controlCalls } = serviceWith([
     zone({ zone_id: "z1", state: "playing", is_next_allowed: false }),
