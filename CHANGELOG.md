@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.3.0] - 2026-07-04
+
+### Added
+
+- `now_playing` now reports `volumePercent` and `isMuted` (issue #10), so
+  relative volume requests like "make it louder" have something to compute
+  from.
+- `control_playback` gains a `playpause` verb, and two new tools land:
+  `seek` (absolute position or relative delta) and `set_loop`
+  (off/all/one) (issue #17).
+- `play_now` accepts `addToQueue: true` to append to the zone's existing
+  queue instead of replacing it.
+
+### Fixed
+
+- The MCP server handshake reported a hard-coded `0.1.0` instead of the
+  real package version (issue #6).
+- Unexpected errors were mislabeled `BROWSE_FAILED`; they now use a
+  dedicated `INTERNAL_ERROR` code so an agent doesn't retry a genuine bug
+  as if it were a browse hiccup (issue #13).
+- `console.error` now routes through the same stderr redirect as the other
+  console methods, for uniform log formatting (issue #15).
+- `now_playing` threw an unshaped `undefined` instead of `ZONE_NOT_FOUND`
+  when a zone vanished mid-request (issue #9).
+- `enqueue_and_play` no longer warns about shuffle being off when
+  `change_settings` is simply unavailable — a common, harmless case on
+  older transports (issue #11).
+- A pending `waitForCore` call now rejects immediately with
+  `NO_CORE_PAIRED` when the Core unpairs or the client stops, instead of
+  hanging until its timeout (issue #16).
+- Library search candidates no longer carry a stray result count (e.g.
+  `"Artists (12)"`) in `sourceGroup` (issue #12).
+- `control_playback(resume)` is now a no-op on an already-playing zone
+  instead of failing with "Action resume is not available" (issue #7).
+- `set_volume`/`mute` targeting a single output in a grouped zone no
+  longer fans out to every output in the group (issue #14).
+- The genre search index now expires after 60 minutes so genres
+  added/removed/renamed in Roon eventually surface without a restart
+  (issue #18).
+
+### Changed
+
+- README: clarified that streaming search/transport support isn't
+  Tidal-specific, and simplified the streaming search and transport
+  sections for non-technical readers.
+
 ## [0.2.3] - 2026-06-22
 
 ### Fixed
