@@ -19,7 +19,7 @@ const SCAN_COUNT = 200;
 // How long the cached genre index stays fresh before a rebuild picks up
 // library genre edits. Long enough to amortize the tree walk across a typical
 // search session, short enough not to serve a stale tree indefinitely (#18).
-export const INDEX_TTL_MS = 10 * 60 * 1000;
+export const INDEX_TTL_MS = 60 * 60 * 1000;
 
 // English container labels that sit inside a genre page alongside its
 // sub-genres. They are NOT genres themselves, so the walk skips them. Same
