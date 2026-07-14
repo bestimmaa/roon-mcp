@@ -19,7 +19,15 @@ async function main(): Promise<void> {
   // One structured logger shared across services; emits [roon-call] lines to
   // stderr so stdout stays reserved for the MCP JSON-RPC stream.
   const logger = createStderrLogger();
-  const roon = new RoonClient();
+  // ROON_HOST switches from SOOD multicast discovery to a direct Core
+  // connection (handy on VLANs/VPNs/containers); ROON_PORT overrides the
+  // default API port. Unset → discovery as before.
+  const host = process.env.ROON_HOST?.trim() || undefined;
+  const port = Number(process.env.ROON_PORT) || undefined;
+  const roon = new RoonClient({
+    ...(host ? { host } : {}),
+    ...(port ? { port } : {}),
+  });
   // Optional configured default zone (a zone/output id or display-name) used
   // when a playback call omits its zoneId.
   const defaultZone = process.env.ROON_DEFAULT_ZONE?.trim() || undefined;

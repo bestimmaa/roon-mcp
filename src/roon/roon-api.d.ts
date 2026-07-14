@@ -31,10 +31,19 @@ declare module "node-roon-api" {
     provided_services?: unknown[];
   }
 
+  export interface WsConnectOptions {
+    host: string;
+    port: number;
+    onclose?: () => void;
+    onerror?: (moo: unknown) => void;
+  }
+
   export default class RoonApi {
     constructor(desc: RoonExtensionDescription);
     init_services(options: InitServicesOptions): void;
     start_discovery(): void;
+    /** Connect straight to a known Core (registration/pairing included). */
+    ws_connect(opts: WsConnectOptions): unknown;
     save_config(key: string, value: unknown): void;
     load_config<T = unknown>(key: string): T | undefined;
   }

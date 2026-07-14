@@ -26,6 +26,14 @@ export interface RoonClientOptions {
    * time the working directory changes (issue #4).
    */
   configPath?: string;
+  /**
+   * Connect straight to a known Core instead of SOOD multicast discovery.
+   * Useful when multicast is unreliable (VLANs, VPNs, containers) or the
+   * Core's address is fixed. Reconnects automatically when the socket drops.
+   */
+  host?: string;
+  /** WebSocket port of the Core's API when `host` is set (default 9330). */
+  port?: number;
   /** Optional sink for diagnostics; defaults to stderr so stdout stays MCP-clean. */
   log?: (message: string) => void;
 }
@@ -38,6 +46,9 @@ const DEFAULTS = {
   email: "christoph.halang@gmail.com",
   website: "https://github.com/bestimmaa/roon-mcp",
 };
+
+/** Delay between direct-connect attempts after the socket closes. */
+const RECONNECT_DELAY_MS = 5_000;
 
 /**
  * Wraps node-roon-api setup, discovery, and pairing lifecycle, and exposes
@@ -61,9 +72,16 @@ export class RoonClient {
     reject: (err: unknown) => void;
   }> = [];
 
+  private readonly directHost: string | undefined;
+  private readonly directPort: number;
+  private stopped = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
   constructor(options: RoonClientOptions = {}) {
     const cfg = { ...DEFAULTS, ...options };
     this.log = options.log ?? ((m) => process.stderr.write(`[roon] ${m}\n`));
+    this.directHost = options.host?.trim() || undefined;
+    this.directPort = options.port ?? 9330;
 
     this.roon = new RoonApi({
       extension_id: cfg.extensionId,
@@ -92,20 +110,47 @@ export class RoonClient {
     this.status = new RoonApiStatus(this.roon);
   }
 
-  /** Initialize services and begin Core discovery. */
+  /** Initialize services and begin Core discovery (or direct connect). */
   start(): void {
     this.roon.init_services({
       required_services: [RoonApiTransport, RoonApiBrowse],
       provided_services: [this.status],
     });
     this.status.set_status("Waiting for Roon Core…", false);
-    this.roon.start_discovery();
-    this.log("discovery started; waiting for a Core to pair");
+    if (this.directHost) {
+      this.connectDirect();
+    } else {
+      this.roon.start_discovery();
+      this.log("discovery started; waiting for a Core to pair");
+    }
+  }
+
+  /**
+   * Open a websocket straight to the configured Core and re-dial whenever it
+   * closes. Registration/pairing rides on the same `ws_connect` path that
+   * discovery uses, so `core_paired` fires identically.
+   */
+  private connectDirect(): void {
+    if (this.stopped) return;
+    this.log(`connecting directly to ${this.directHost}:${this.directPort}`);
+    this.roon.ws_connect({
+      host: this.directHost!,
+      port: this.directPort,
+      onclose: () => {
+        if (this.stopped) return;
+        this.log(
+          `connection to ${this.directHost}:${this.directPort} closed; retrying in ${RECONNECT_DELAY_MS / 1000}s`,
+        );
+        this.reconnectTimer = setTimeout(() => this.connectDirect(), RECONNECT_DELAY_MS);
+      },
+    });
   }
 
   stop(): void {
     // node-roon-api has no clean teardown; drop references and reject waiters
     // so a pending waitForCore doesn't hang until its timeout during shutdown.
+    this.stopped = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.core) this.zones.stopFor(this.core.core_id);
     this.core = undefined;
     this.rejectWaiters(
