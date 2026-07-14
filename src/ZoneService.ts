@@ -72,7 +72,9 @@ export class ZoneService {
 
   /**
    * Resolve the zone a playback call should target.
-   * - Explicit id (zone or output): used as-is; unknown id → `ZONE_NOT_FOUND`.
+   * - Explicit id (zone or output): used as-is. If nothing matches as an id,
+   *   fall back to display-name matching — the tool contract promises "an id,
+   *   or a name substring like 'Office'". Still nothing → `ZONE_NOT_FOUND`.
    * - Omitted: fall back to the configured default (matched as an id first,
    *   then as a display name), else the single/Office/playing heuristics.
    * Returns `ZONE_AMBIGUOUS` when no single zone can be chosen.
@@ -80,14 +82,32 @@ export class ZoneService {
   async resolveTarget(explicitId?: string): Promise<ResolvedZoneTarget> {
     if (explicitId) {
       const zone = await this.findZone(explicitId);
-      if (!zone) {
+      if (zone) {
+        // Preserve the caller's id (it may be an output id) as the action target.
+        return { targetId: explicitId, zone };
+      }
+      // Strict name matching only — no single-zone shortcut, so a garbage id
+      // never silently redirects to an unrelated zone.
+      const zones = await this.listZones();
+      const needle = explicitId.trim().toLowerCase();
+      const exact = zones.filter((z) => z.displayName.toLowerCase() === needle);
+      const matches = exact.length
+        ? exact
+        : zones.filter((z) => z.displayName.toLowerCase().includes(needle));
+      if (matches.length === 1) return { targetId: matches[0]!.zoneId, zone: matches[0]! };
+      if (matches.length > 1) {
         throw new RoonMcpError(
-          "ZONE_NOT_FOUND",
-          `No zone or output matches id "${explicitId}". Call list_zones for current ids.`,
+          "ZONE_AMBIGUOUS",
+          `"${explicitId}" matches multiple zones; pass an explicit zoneId.`,
+          {
+            candidates: matches.map((z) => ({ zoneId: z.zoneId, displayName: z.displayName })),
+          },
         );
       }
-      // Preserve the caller's id (it may be an output id) as the action target.
-      return { targetId: explicitId, zone };
+      throw new RoonMcpError(
+        "ZONE_NOT_FOUND",
+        `No zone or output matches "${explicitId}". Call list_zones for current ids and names.`,
+      );
     }
 
     // A configured default may be a zone/output id…
