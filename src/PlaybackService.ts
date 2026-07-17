@@ -26,6 +26,11 @@ import {
 // genre), re-navigating to a live key via SearchNavigator.
 const LOAD_COUNT = 100;
 
+// How many container levels findAction may drill through before giving up.
+// Covers the deepest known real shape: album-versions page (list) → track
+// list ("Play Album" action_list) → the action menu itself.
+const MAX_ACTION_DRILL_DEPTH = 3;
+
 // English Roon action labels, ordered by preference (highest first). The plan
 // flags localization as an open item; non-English Cores need locale-aware
 // matching here, mirroring SearchService's GROUP_TITLE_TO_TYPE caveat.
@@ -348,34 +353,69 @@ export class PlaybackService {
 
   /**
    * Find an action (by label preference) for the currently-opened item.
-   * Inspects the loaded list directly, and drills one level into an
-   * `action_list` container if the actions aren't exposed at the top level.
+   * Inspects the loaded list directly, and drills into containers when the
+   * actions aren't exposed at the top level, preferring an `action_list`
+   * container (e.g. "Play Album" / "More") over a plain `list` child.
+   *
+   * The plain-`list` fallback handles pass-through levels that hold no
+   * actions at all — most notably the album-versions page the search
+   * hierarchy returns when opening an album (a lone `list` item for the
+   * album itself, with "Play Album" living one level deeper). It only fires
+   * when every selectable item at the level is a `list`, so levels that mix
+   * real actions with sub-lists are never mis-drilled.
+   *
    * Reports how many extra levels it pushed so callers can pop back.
    */
   private async findAction(
     hierarchy: BrowseHierarchy,
     labels: string[],
   ): Promise<{ action: BrowseItem | null; extraLevelsPushed: number }> {
-    const loaded = await this.browse.load({
-      hierarchy,
-      offset: 0,
-      count: LOAD_COUNT,
-    });
+    let extraLevelsPushed = 0;
 
-    const direct = pickAction(loaded.items, labels);
-    if (direct) return { action: direct, extraLevelsPushed: 0 };
-
-    const container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
-    if (container) {
-      await this.browse.browse({ hierarchy, item_key: container.item_key! });
-      const sub = await this.browse.load({
+    for (let depth = 0; depth <= MAX_ACTION_DRILL_DEPTH; depth++) {
+      const loaded = await this.browse.load({
         hierarchy,
         offset: 0,
         count: LOAD_COUNT,
       });
-      return { action: pickAction(sub.items, labels), extraLevelsPushed: 1 };
+
+      const direct = pickAction(loaded.items, labels);
+      if (direct) return { action: direct, extraLevelsPushed };
+
+      if (depth === MAX_ACTION_DRILL_DEPTH) break;
+
+      // Prefer an action-menu container; its children are the real actions.
+      let container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
+
+      if (!container) {
+        // Pass-through level: nothing actionable, only sub-lists (e.g. the
+        // album-versions page). Drill the first one — Roon lists the primary
+        // version first — and look again a level deeper.
+        const selectable = loaded.items.filter(
+          (i) => Boolean(i.item_key) && i.hint !== "header",
+        );
+        const allLists =
+          selectable.length > 0 && selectable.every((i) => i.hint === "list");
+        if (allLists) container = selectable[0];
+      }
+      if (!container) break;
+
+      // The drill is speculative discovery — if the Core rejects it, report
+      // "no play action" rather than surfacing a confusing browse error.
+      let drilled;
+      try {
+        drilled = await this.browse.browse({
+          hierarchy,
+          item_key: container.item_key!,
+        });
+      } catch {
+        break;
+      }
+      if (drilled.action !== "list") break;
+      extraLevelsPushed++;
     }
-    return { action: null, extraLevelsPushed: 0 };
+
+    return { action: null, extraLevelsPushed };
   }
 
   /** Best-effort shuffle via Transport; returns false if unsupported/failed. */
