@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.4.0] - 2026-07-17
+
+### Added
+
+- Optional direct connection to a known Core via `ROON_HOST` (and
+  `ROON_PORT`, default 9330), for networks where SOOD multicast discovery
+  doesn't survive — VLAN-segmented setups, VPNs, containers. Discovery
+  remains the default; behavior is unchanged when `ROON_HOST` is unset
+  (#34).
+
+### Fixed
+
+- An explicit playback target now resolves by display name, not just by
+  id. The tool contract already advertised "an id, or a name substring
+  like 'Office'", but a name passed as an explicit target threw
+  `ZONE_NOT_FOUND`; it now matches exact-then-substring, reporting
+  `ZONE_AMBIGUOUS` with candidates when several zones match (#32).
+- Albums opened from search often land on a "versions" pass-through page,
+  so `findAction` never found "Play Album" and playback silently failed.
+  It now drills through bounded container levels to reach the real play
+  action, only descending pure pass-through levels so mixed action/list
+  levels are never mis-drilled (#33).
+
 ## [0.3.0] - 2026-07-04
 
 ### Added
