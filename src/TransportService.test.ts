@@ -51,6 +51,9 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   settingsCalls: RecordedSettings[];
   pauseAllCalls: () => number;
   muteAllCalls: Array<"mute" | "unmute">;
+  transferCalls: Array<{ from: string; to: string }>;
+  groupCalls: string[][];
+  ungroupCalls: string[][];
 } {
   const controlCalls: RecordedControl[] = [];
   const volumeCalls: RecordedVolume[] = [];
@@ -58,6 +61,10 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   const seekCalls: RecordedSeek[] = [];
   const settingsCalls: RecordedSettings[] = [];
   const muteAllCalls: Array<"mute" | "unmute"> = [];
+  const transferCalls: Array<{ from: string; to: string }> = [];
+  const groupCalls: string[][] = [];
+  const ungroupCalls: string[][] = [];
+  const asId = (o: string | RoonOutput) => (typeof o === "string" ? o : o.output_id);
   let pauseAlls = 0;
 
   const stub = {
@@ -117,6 +124,18 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         muteAllCalls.push(how);
         cb?.(false);
       },
+      transfer_zone: (from: string, to: string, cb?: (e: string | false) => void) => {
+        transferCalls.push({ from, to });
+        cb?.(false);
+      },
+      group_outputs: (outputs: Array<string | RoonOutput>, cb?: (e: string | false) => void) => {
+        groupCalls.push(outputs.map(asId));
+        cb?.(false);
+      },
+      ungroup_outputs: (outputs: Array<string | RoonOutput>, cb?: (e: string | false) => void) => {
+        ungroupCalls.push(outputs.map(asId));
+        cb?.(false);
+      },
     }),
     getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
@@ -132,6 +151,9 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
     settingsCalls,
     pauseAllCalls: () => pauseAlls,
     muteAllCalls,
+    transferCalls,
+    groupCalls,
+    ungroupCalls,
   };
 }
 
@@ -668,4 +690,55 @@ test("setAutoRadio sends change_settings with the auto_radio flag", async () => 
   const out = await svc.setAutoRadio("z1", true);
   assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { auto_radio: true } }]);
   assert.deepEqual(out, { ok: true, zoneId: "z1", autoRadio: true });
+});
+
+// --- transfer / grouping ----------------------------------------------------
+
+test("transferZone resolves both ends (name substrings included)", async () => {
+  const { svc, transferCalls } = serviceWith([
+    zone({ zone_id: "z1", display_name: "Office" }),
+    zone({ zone_id: "z2", display_name: "Kitchen" }),
+  ]);
+  const out = await svc.transferZone("Office", "Kitchen");
+  assert.deepEqual(transferCalls, [{ from: "z1", to: "z2" }]);
+  assert.deepEqual(out, { ok: true, fromZoneId: "z1", toZoneId: "z2" });
+});
+
+test("transferZone refuses when source and destination are the same zone", async () => {
+  const { svc, transferCalls } = serviceWith([zone({ zone_id: "z1", display_name: "Office" })]);
+  await assert.rejects(
+    () => svc.transferZone("z1", "Office"),
+    (e: unknown) => e instanceof RoonMcpError && /same zone/.test(e.message),
+  );
+  assert.equal(transferCalls.length, 0);
+});
+
+test("groupOutputs expands zone entries to their output ids, first entry's queue first", async () => {
+  const grouped = zone({
+    zone_id: "z1",
+    display_name: "Living Room",
+    outputs: [
+      { output_id: "o1", zone_id: "z1", display_name: "Left" },
+      { output_id: "o2", zone_id: "z1", display_name: "Right" },
+    ],
+  });
+  const { svc, groupCalls } = serviceWith([grouped, zone({ zone_id: "z2", display_name: "Kitchen" })]);
+  const out = await svc.groupOutputs(["Living Room", "Kitchen"], "group");
+  assert.deepEqual(groupCalls, [["o1", "o2", "o:z2"]]);
+  assert.deepEqual(out, { ok: true, action: "group", outputIds: ["o1", "o2", "o:z2"] });
+});
+
+test("groupOutputs requires at least two entries to group", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })]);
+  await assert.rejects(
+    () => svc.groupOutputs(["z1"], "group"),
+    (e: unknown) => e instanceof RoonMcpError && /at least 2/.test(e.message),
+  );
+});
+
+test("ungroup accepts a single zone and detaches its outputs", async () => {
+  const { svc, ungroupCalls } = serviceWith([zone({ zone_id: "z2", display_name: "Kitchen" })]);
+  const out = await svc.groupOutputs(["Kitchen"], "ungroup");
+  assert.deepEqual(ungroupCalls, [["o:z2"]]);
+  assert.equal(out.action, "ungroup");
 });

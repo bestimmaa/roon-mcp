@@ -620,6 +620,98 @@ export class RoonMcpServer {
         }
       },
     );
+
+    this.server.registerTool(
+      "transfer_zone",
+      {
+        title: "Move playback from one Roon zone to another",
+        description:
+          "Use this when the music should follow the user to another room " +
+          "(e.g. \"move this to the bedroom\"). Moves the playing queue — " +
+          "current track, position, and upcoming items — to the destination " +
+          "zone; the source stops. toZoneId is required (id or name " +
+          "substring); fromZoneId is optional and resolves like now_playing " +
+          "(typically the currently-playing zone).",
+        inputSchema: {
+          fromZoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Source zone id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          toZoneId: z
+            .string()
+            .min(1)
+            .describe("Destination zone id or name substring from list_zones."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.transferZone(args.fromZoneId, args.toZoneId));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "group_outputs",
+      {
+        title: "Group Roon outputs into one synchronized zone",
+        description:
+          "Use this when the user wants the same music in several rooms at " +
+          "once (e.g. \"group the kitchen and living room\", \"play this " +
+          "everywhere\"). Joins the outputs into one synchronized zone. " +
+          "Entries are zone/output ids or name substrings; a zone name " +
+          "expands to all its outputs. ORDER MATTERS: the FIRST entry's queue " +
+          "keeps playing — put the already-playing room first. Roon rejects " +
+          "hardware-incompatible groupings. Undo with ungroup_outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(2)
+            .describe(
+              "Two or more zone/output ids or name substrings. The first " +
+                "entry's queue survives the grouping.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "group"));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "ungroup_outputs",
+      {
+        title: "Split grouped Roon outputs back into separate zones",
+        description:
+          "Use this to stop multi-room playback (e.g. \"ungroup the " +
+          "speakers\", \"stop playing in the kitchen but keep the living " +
+          "room\"). Detaches the named outputs from their synchronized group; " +
+          "each becomes its own zone again. Entries are zone/output ids or " +
+          "name substrings; a zone name expands to all its outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe("Zone/output ids or name substrings to detach from their group."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "ungroup"));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
   }
 
   async start(): Promise<void> {

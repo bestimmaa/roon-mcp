@@ -81,6 +81,21 @@ export interface SetAutoRadioResult {
   autoRadio: boolean;
 }
 
+/** Result of `transferZone`. */
+export interface TransferZoneResult {
+  ok: true;
+  fromZoneId: string;
+  toZoneId: string;
+}
+
+/** Result of `groupOutputs`. */
+export interface GroupResult {
+  ok: true;
+  action: "group" | "ungroup";
+  /** The resolved output ids the operation was applied to. */
+  outputIds: string[];
+}
+
 /**
  * Transport controls: read now-playing state, run pause/resume/next/previous/
  * stop, and set volume or mute state. All zone-targeting follows the same
@@ -459,6 +474,104 @@ export class TransportService {
         }),
     );
     return { ok: true, zoneId: targetId, autoRadio: enabled };
+  }
+
+  /** Move what's playing (queue and all) from one zone to another. */
+  async transferZone(fromZoneId: string | undefined, toZoneId: string): Promise<TransferZoneResult> {
+    const { targetId: fromId } = await this.zones.resolveTarget(fromZoneId);
+    const { targetId: toId } = await this.zones.resolveTarget(toZoneId);
+    if (fromId === toId) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Source and destination resolve to the same zone — nothing to transfer.",
+      );
+    }
+    const transport = this.roon.getTransport();
+    if (typeof transport.transfer_zone !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Zone transfer is not available on this Core (transfer_zone unsupported).",
+      );
+    }
+    await this.logger.call(
+      "transfer_zone",
+      { from: fromId, to: toId },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.transfer_zone!(fromId, toId, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `transfer_zone failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, fromZoneId: fromId, toZoneId: toId };
+  }
+
+  /**
+   * Group outputs into one synchronized zone, or break a group apart. Each
+   * entry resolves like any zone target (id or name substring); an entry that
+   * resolves to a whole zone expands to all of that zone's outputs. Grouping
+   * preserves the FIRST entry's queue.
+   */
+  async groupOutputs(zonesOrOutputs: string[], action: "group" | "ungroup"): Promise<GroupResult> {
+    const minimum = action === "group" ? 2 : 1;
+    if (zonesOrOutputs.length < minimum) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `${action} needs at least ${minimum} zone(s)/output(s) (got ${zonesOrOutputs.length}).`,
+      );
+    }
+
+    // Resolve every entry to concrete output ids, preserving order (the first
+    // output's queue survives a group) and dropping duplicates.
+    const outputIds: string[] = [];
+    for (const entry of zonesOrOutputs) {
+      const { targetId } = await this.zones.resolveTarget(entry);
+      const raw = await this.findRawZone(targetId);
+      if (!raw) {
+        throw new RoonMcpError("ZONE_NOT_FOUND", `Zone/output "${entry}" is no longer available.`);
+      }
+      const ids =
+        raw.zone_id === targetId
+          ? (raw.outputs ?? []).map((o) => o.output_id)
+          : [targetId];
+      for (const id of ids) {
+        if (!outputIds.includes(id)) outputIds.push(id);
+      }
+    }
+    if (action === "group" && outputIds.length < 2) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "The entries resolve to fewer than two distinct outputs — nothing to group.",
+      );
+    }
+
+    const transport = this.roon.getTransport();
+    const fn = action === "group" ? transport.group_outputs : transport.ungroup_outputs;
+    if (typeof fn !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `Output grouping is not available on this Core (${action}_outputs unsupported).`,
+      );
+    }
+    await this.logger.call(
+      `${action}_outputs`,
+      { outputIds },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          fn.call(transport, outputIds, (error: string | false) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `${action}_outputs failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, action, outputIds };
   }
 
   private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {

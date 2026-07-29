@@ -315,6 +315,22 @@ declare module "node-roon-api-transport" {
     pause_all?(cb?: (error: string | false) => void): void;
     /** Mute or unmute every mutable zone. */
     mute_all?(how: "mute" | "unmute", cb?: (error: string | false) => void): void;
+    /** Move what's playing from one zone/output to another (queue and all). */
+    transfer_zone?(
+      fromZoneOrOutput: string,
+      toZoneOrOutput: string,
+      cb?: (error: string | false) => void,
+    ): void;
+    /** Group outputs into one synchronized zone (first output's queue wins). */
+    group_outputs?(
+      outputs: Array<string | RoonOutput>,
+      cb?: (error: string | false) => void,
+    ): void;
+    /** Break previously grouped outputs apart. */
+    ungroup_outputs?(
+      outputs: Array<string | RoonOutput>,
+      cb?: (error: string | false) => void,
+    ): void;
   }
 
   const _default: typeof RoonApiTransport;
