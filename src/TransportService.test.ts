@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { GetZonesBody, RoonApiTransport, RoonApiZone, RoonOutput } from "node-roon-api-transport";
+import type {
+  GetZonesBody,
+  RoonApiTransport,
+  RoonApiZone,
+  RoonOutput,
+  RoonQueueItem,
+} from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
 import { TransportService } from "./TransportService.js";
@@ -41,8 +47,15 @@ interface RecordedSettings {
   settings: Record<string, unknown>;
 }
 
+interface HarnessOpts {
+  /** Queue snapshot served by the fake `subscribe_queue`. */
+  queueItems?: RoonQueueItem[];
+  /** When set, the fake `play_from_here` fails with this moo message name. */
+  playFromError?: string;
+}
+
 /** Builds a TransportService backed by a stub RoonClient with the given zones. */
-function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
+function serviceWith(zones: RoonApiZone[], defaultZone?: string, opts: HarnessOpts = {}): {
   svc: TransportService;
   controlCalls: RecordedControl[];
   volumeCalls: RecordedVolume[];
@@ -51,6 +64,9 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   settingsCalls: RecordedSettings[];
   pauseAllCalls: () => number;
   muteAllCalls: Array<"mute" | "unmute">;
+  queueSubCalls: Array<{ zone: string; limit: number }>;
+  unsubscribeCount: () => number;
+  playFromCalls: Array<{ zone: string; queueItemId: number }>;
 } {
   const controlCalls: RecordedControl[] = [];
   const volumeCalls: RecordedVolume[] = [];
@@ -58,7 +74,10 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   const seekCalls: RecordedSeek[] = [];
   const settingsCalls: RecordedSettings[] = [];
   const muteAllCalls: Array<"mute" | "unmute"> = [];
+  const queueSubCalls: Array<{ zone: string; limit: number }> = [];
+  const playFromCalls: Array<{ zone: string; queueItemId: number }> = [];
   let pauseAlls = 0;
+  let unsubscribes = 0;
 
   const stub = {
     waitForCore: async () => undefined,
@@ -117,6 +136,25 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         muteAllCalls.push(how);
         cb?.(false);
       },
+      // Fires the snapshot synchronously — deliberately exercises the
+      // "callback before the handle is assigned" guard in getQueue.
+      subscribe_queue: (
+        zoneOrOutput: string,
+        maxItemCount: number,
+        cb: (response: string, body: { items?: RoonQueueItem[] }) => void,
+      ) => {
+        queueSubCalls.push({ zone: zoneOrOutput, limit: maxItemCount });
+        cb("Subscribed", { items: opts.queueItems ?? [] });
+        return { unsubscribe: () => unsubscribes++ };
+      },
+      play_from_here: (
+        zoneOrOutput: string,
+        queueItemId: number,
+        cb?: (msg: { name: string } | undefined, body: unknown) => void,
+      ) => {
+        playFromCalls.push({ zone: zoneOrOutput, queueItemId });
+        cb?.({ name: opts.playFromError ?? "Success" }, {});
+      },
     }),
     getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
@@ -132,6 +170,9 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
     settingsCalls,
     pauseAllCalls: () => pauseAlls,
     muteAllCalls,
+    queueSubCalls,
+    unsubscribeCount: () => unsubscribes,
+    playFromCalls,
   };
 }
 
@@ -668,4 +709,74 @@ test("setAutoRadio sends change_settings with the auto_radio flag", async () => 
   const out = await svc.setAutoRadio("z1", true);
   assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { auto_radio: true } }]);
   assert.deepEqual(out, { ok: true, zoneId: "z1", autoRadio: true });
+});
+
+// --- queue read-back / play-from-here --------------------------------------
+
+test("getQueue maps the snapshot to 1-based entries and unsubscribes immediately", async () => {
+  const items: RoonQueueItem[] = [
+    {
+      queue_item_id: 101,
+      length: 240,
+      image_key: "img:1",
+      three_line: { line1: "A Walk", line2: "Tycho", line3: "Dive" },
+    },
+    { queue_item_id: 102, two_line: { line1: "Gymnopédie No.1", line2: "Erik Satie" } },
+  ];
+  const { svc, queueSubCalls, unsubscribeCount } = serviceWith(
+    [zone({ zone_id: "z1" })],
+    undefined,
+    { queueItems: items },
+  );
+
+  const out = await svc.getQueue("z1", 10);
+  assert.deepEqual(queueSubCalls, [{ zone: "z1", limit: 10 }]);
+  assert.equal(unsubscribeCount(), 1, "one-shot read must tear the subscription down");
+  assert.equal(out.zoneId, "z1");
+  assert.deepEqual(out.entries, [
+    {
+      position: 1,
+      queueItemId: 101,
+      title: "A Walk",
+      artist: "Tycho",
+      album: "Dive",
+      lengthSec: 240,
+      imageKey: "img:1",
+    },
+    {
+      position: 2,
+      queueItemId: 102,
+      title: "Gymnopédie No.1",
+      artist: "Erik Satie",
+      album: undefined,
+      lengthSec: undefined,
+      imageKey: undefined,
+    },
+  ]);
+  assert.equal(out.message, undefined);
+});
+
+test("getQueue reports an empty queue with a message", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.getQueue("z1");
+  assert.deepEqual(out.entries, []);
+  assert.equal(out.message, "The queue is empty.");
+});
+
+test("playFromHere passes the resolved zone and queue item id", async () => {
+  const { svc, playFromCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.playFromHere("z1", 42);
+  assert.deepEqual(playFromCalls, [{ zone: "z1", queueItemId: 42 }]);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", queueItemId: 42 });
+});
+
+test("playFromHere surfaces a non-Success moo message as BROWSE_FAILED", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })], undefined, {
+    playFromError: "InvalidRequest",
+  });
+  await assert.rejects(
+    () => svc.playFromHere("z1", 42),
+    (e: unknown) =>
+      e instanceof RoonMcpError && e.code === "BROWSE_FAILED" && /InvalidRequest/.test(e.message),
+  );
 });
