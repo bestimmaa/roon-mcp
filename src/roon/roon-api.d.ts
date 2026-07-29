@@ -311,6 +311,10 @@ declare module "node-roon-api-transport" {
       how: "mute" | "unmute",
       cb?: (error: string | false) => void,
     ): void;
+    /** Pause every zone. */
+    pause_all?(cb?: (error: string | false) => void): void;
+    /** Mute or unmute every mutable zone. */
+    mute_all?(how: "mute" | "unmute", cb?: (error: string | false) => void): void;
   }
 
   const _default: typeof RoonApiTransport;

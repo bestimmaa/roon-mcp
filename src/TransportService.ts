@@ -62,6 +62,25 @@ export interface MuteResult {
   muted: boolean;
 }
 
+/** Result of `pauseAll`. */
+export interface PauseAllResult {
+  ok: true;
+  action: "pause_all";
+}
+
+/** Result of `muteAll`. */
+export interface MuteAllResult {
+  ok: true;
+  muted: boolean;
+}
+
+/** Result of `setAutoRadio`. */
+export interface SetAutoRadioResult {
+  ok: true;
+  zoneId: string;
+  autoRadio: boolean;
+}
+
 /**
  * Transport controls: read now-playing state, run pause/resume/next/previous/
  * stop, and set volume or mute state. All zone-targeting follows the same
@@ -352,6 +371,94 @@ export class TransportService {
     );
 
     return { ok: true, zoneId: targetId, mode };
+  }
+
+  /** Pause every zone on the Core. */
+  async pauseAll(): Promise<PauseAllResult> {
+    await this.roon.waitForCore();
+    const transport = this.roon.getTransport();
+    if (typeof transport.pause_all !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Whole-house pause is not available on this Core (pause_all unsupported).",
+      );
+    }
+    await this.logger.call(
+      "pause_all",
+      {},
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.pause_all!((error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `pause_all failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, action: "pause_all" };
+  }
+
+  /** Mute or unmute every mutable zone on the Core. */
+  async muteAll(muted: boolean): Promise<MuteAllResult> {
+    await this.roon.waitForCore();
+    const transport = this.roon.getTransport();
+    if (typeof transport.mute_all !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Whole-house mute is not available on this Core (mute_all unsupported).",
+      );
+    }
+    const how = muted ? "mute" : "unmute";
+    await this.logger.call(
+      "mute_all",
+      { how },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.mute_all!(how, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `mute_all failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, muted };
+  }
+
+  /** Turn Roon Radio (auto-radio queue continuation) on or off for a zone. */
+  async setAutoRadio(zoneId: string | undefined, enabled: boolean): Promise<SetAutoRadioResult> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const raw = await this.findRawZone(targetId);
+    if (!raw) {
+      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
+    }
+    const transport = this.roon.getTransport();
+    if (typeof transport.change_settings !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Roon Radio settings are not available on this Core (change_settings unsupported).",
+      );
+    }
+    await this.logger.call(
+      "change_settings",
+      { zoneId: targetId, settings: { auto_radio: enabled } },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.change_settings!(targetId, { auto_radio: enabled }, (error) => {
+            if (error) {
+              reject(
+                new RoonMcpError("BROWSE_FAILED", `change_settings(auto_radio) failed: ${error}`),
+              );
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, zoneId: targetId, autoRadio: enabled };
   }
 
   private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
