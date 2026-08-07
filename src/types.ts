@@ -66,6 +66,59 @@ export interface GetTracksForOutput {
   skipped: Array<{ itemKey?: string; reason: string }>;
 }
 
+export interface GetItemInfoInput {
+  /** Opaque, session-scoped item key from a recent `search_music` result. */
+  itemKey: string;
+}
+
+/** One row of a browsed page — a track, an album, a sub-list, or an action. */
+export interface ItemInfoEntry {
+  title: string;
+  /** Roon packs metadata here: performer credits on album track rows, album
+   * counts on artist rows, and so on. Returned verbatim. */
+  subtitle?: string;
+  /** Artwork key for the row, resolvable via `get_artwork`. */
+  imageKey?: string;
+}
+
+/** Consecutive page rows under one header (or the unlabelled leading rows). */
+export interface ItemInfoSection {
+  title?: string;
+  items: ItemInfoEntry[];
+}
+
+/**
+ * A browsed item's page as data. The Browse API exposes no bio/overview text;
+ * an album page's track subtitles carrying per-track performer credits is as
+ * rich as the metadata gets (issue #39).
+ */
+export interface GetItemInfoOutput {
+  sourceItemKey: string;
+  title: string;
+  subtitle?: string;
+  imageKey?: string;
+  sections: ItemInfoSection[];
+  /** Set when Roon returned a message page instead of a list. */
+  message?: string;
+}
+
+export interface GetArtworkInput {
+  /** Image key from `now_playing` or `get_item_info`. */
+  imageKey: string;
+  /** Bounding-box width in pixels (default 512). */
+  width?: number;
+  /** Bounding-box height in pixels (default 512). */
+  height?: number;
+}
+
+export interface ArtworkResult {
+  imageKey: string;
+  contentType: string;
+  sizeBytes: number;
+  /** Base64-encoded image bytes. */
+  base64: string;
+}
+
 export interface PlayNowInput {
   /**
    * Zone id or any of its output ids (from `list_zones`). Optional: when
@@ -210,6 +263,7 @@ export type RoonMcpErrorCode =
   | "NO_PLAY_ACTION"
   | "ACTION_FAILED"
   | "PARTIAL_QUEUE"
+  | "IMAGE_FETCH_FAILED"
   | "INTERNAL_ERROR";
 
 export class RoonMcpError extends Error {

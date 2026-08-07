@@ -3,7 +3,7 @@
 //
 // Spawns the built MCP server (dist/index.js) over stdio, the same way a real
 // MCP client would, and exercises the tool surface end-to-end. Read-only steps
-// (list_zones, search_music, get_tracks_for) run by default. Audible steps that
+// (list_zones, search_music, get_item_info, get_artwork) run by default. Audible steps that
 // actually start music are gated behind env flags so this never surprises you:
 //
 //   node scripts/integration.mjs                 # list + search + expand only
@@ -133,6 +133,49 @@ async function main() {
       const r = await call(client, "search_music", { query: artist, type: "artist", limit: 2 });
       const top = topCandidate(r);
       log(`  ${artist} → ${top ? `${top.title} [${top.type}]` : "(no match)"}`);
+    }
+
+    section(`get_item_info — top "${ARTISTS[0]}" album`);
+    const albumResult = await call(client, "search_music", {
+      query: ARTISTS[0],
+      type: "album",
+      limit: 1,
+    });
+    const album = topCandidate(albumResult);
+    let artworkKey;
+    if (!album) {
+      log(`No "${ARTISTS[0]}" album candidate to inspect.`);
+    } else {
+      const info = await call(client, "get_item_info", { itemKey: album.itemKey });
+      log(`  ${info.title}${info.subtitle ? ` — ${info.subtitle}` : ""}`);
+      if (info.message) log(`  (${info.message})`);
+      for (const s of info.sections ?? []) {
+        log(`  [${s.title ?? "items"}] ${s.items.length} row(s)`);
+        for (const it of s.items.slice(0, 5)) {
+          log(`    - ${it.title}${it.subtitle ? `  (${it.subtitle})` : ""}`);
+        }
+      }
+      artworkKey =
+        info.imageKey ?? info.sections?.flatMap((s) => s.items).find((it) => it.imageKey)?.imageKey;
+    }
+
+    section("get_artwork");
+    if (!artworkKey) {
+      log("No imageKey surfaced by get_item_info; skipping.");
+    } else {
+      // call() only returns structuredContent; go through callTool directly so
+      // the MCP image content block is visible too.
+      const res = await client.callTool({
+        name: "get_artwork",
+        arguments: { imageKey: artworkKey, width: 256, height: 256 },
+      });
+      if (res.isError) {
+        const text = res.content?.find((c) => c.type === "text")?.text ?? "";
+        throw new Error(`get_artwork failed: ${text}`);
+      }
+      const image = res.content?.find((c) => c.type === "image");
+      const meta = res.structuredContent ?? {};
+      log(`  → ${meta.contentType} ${meta.sizeBytes} bytes (image block: ${image ? "yes" : "MISSING"})`);
     }
 
     if (PLAY) {

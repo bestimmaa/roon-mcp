@@ -18,6 +18,10 @@ declare module "node-roon-api" {
     core_id: string;
     display_name: string;
     display_version: string;
+    /** Registration reply from the Core; `http_port` serves `/api/image`. */
+    registration?: { http_port?: number };
+    /** Live moo connection; `transport.host` is the address the websocket dialed. */
+    moo?: { transport?: { host?: string } };
     services: {
       RoonApiTransport: import("node-roon-api-transport").RoonApiTransport;
       RoonApiBrowse: import("node-roon-api-browse").RoonApiBrowse;

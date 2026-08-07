@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { ArtworkService } from "./ArtworkService.js";
+import { ItemInfoService } from "./ItemInfoService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
@@ -37,6 +39,8 @@ export class RoonMcpServer {
     private readonly tracks: TrackExpansionService,
     private readonly playback: PlaybackService,
     private readonly transport: TransportService,
+    private readonly items: ItemInfoService,
+    private readonly artwork: ArtworkService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -176,6 +180,98 @@ export class RoonMcpServer {
         try {
           const result = await this.tracks.getTracksFor(args);
           return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "get_item_info",
+      {
+        title: "Get a Roon item's page as structured info",
+        description:
+          "Use this when the user asks about an item rather than to play it — " +
+          "what's on an album, who performs on it, what albums an artist has " +
+          "(e.g. \"what's on this album?\", \"who plays on track 3?\", \"list " +
+          "Caribou's albums\"). Opens a search_music candidate and returns its " +
+          "page as data: the item's own title/subtitle/imageKey plus its child " +
+          "rows grouped by header section. On an album page the track rows' " +
+          "subtitles carry the per-track performer credits; on an artist page " +
+          "the sections cover albums and top tracks. Roon's Browse API exposes " +
+          "no bio/overview text, so there is none to return. Pass an itemKey " +
+          "from a recent search_music result (session-scoped; a track key from " +
+          "get_tracks_for returns the page of the item the track was expanded " +
+          "from, which contains the track's row). Returned rows are display " +
+          "data only and carry no item keys — to play something found here, " +
+          "resolve it with search_music/get_tracks_for. imageKeys resolve to " +
+          "real images via get_artwork.",
+        inputSchema: {
+          itemKey: z
+            .string()
+            .min(1)
+            .describe(
+              "Item key to inspect — from a recent search_music candidate " +
+                "(artist, album, genre, playlist, …).",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          const result = await this.items.getItemInfo(args);
+          return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "get_artwork",
+      {
+        title: "Fetch Roon artwork for an image key",
+        description:
+          "Use this when the user wants to see artwork — the current track's " +
+          "cover, an album cover, or an artist image (e.g. \"show me the album " +
+          "art\", \"what does the cover look like?\"). Resolves an opaque " +
+          "imageKey (from now_playing or get_item_info) into the actual image, " +
+          "fetched from the Core's HTTP image endpoint and returned as an MCP " +
+          "image content block (base64). Optional width/height set the " +
+          "bounding box in pixels (default 512); the image is scaled to fit. " +
+          "Fails with IMAGE_FETCH_FAILED when the key is stale or the Core is " +
+          "unreachable over HTTP — re-read the key from now_playing or " +
+          "get_item_info and retry.",
+        inputSchema: {
+          imageKey: z
+            .string()
+            .min(1)
+            .describe("Image key from now_playing or get_item_info."),
+          width: z
+            .number()
+            .int()
+            .min(16)
+            .max(2048)
+            .optional()
+            .describe("Bounding-box width in pixels (default 512)."),
+          height: z
+            .number()
+            .int()
+            .min(16)
+            .max(2048)
+            .optional()
+            .describe("Bounding-box height in pixels (default 512)."),
+        },
+      },
+      async (args) => {
+        try {
+          const { base64, ...meta } = await this.artwork.getArtwork(args);
+          return {
+            content: [
+              { type: "image" as const, data: base64, mimeType: meta.contentType },
+              { type: "text" as const, text: JSON.stringify(meta, null, 2) },
+            ],
+            structuredContent: meta as unknown as Record<string, unknown>,
+          };
         } catch (err) {
           return toToolError(err);
         }
