@@ -2,6 +2,7 @@ import type { BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
+import { stripRoonLinks } from "./ItemInfoService.js";
 import { encodeLocator } from "./locator.js";
 import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
 import { perAlbumBudget, TrackExpansionService } from "./TrackExpansionService.js";
@@ -314,8 +315,8 @@ export class SearchService {
         children.forEach((item, i) => {
           out.push({
             itemKey: encodeLocator({ q: query, g, i }),
-            title: item.title,
-            subtitle: item.subtitle,
+            title: stripRoonLinks(item.title),
+            subtitle: item.subtitle ? stripRoonLinks(item.subtitle) : undefined,
             type,
             score: 0,
             available: true,

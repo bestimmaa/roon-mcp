@@ -98,8 +98,9 @@ export class ItemInfoService {
 /**
  * Roon titles/subtitles embed link markup — `[[1481082|Tycho]]` renders as
  * "Tycho" in Roon's own UI. The ids are useless outside Roon; keep the text.
+ * (Also used by SearchService on candidate titles/subtitles.)
  */
-function stripRoonLinks(text: string): string {
+export function stripRoonLinks(text: string): string {
   return text.replace(/\[\[[^\]|]*\|([^\]]*)\]\]/g, "$1");
 }
 
