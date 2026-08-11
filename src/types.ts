@@ -201,6 +201,7 @@ export interface NowPlayingInfo {
 
 export type RoonMcpErrorCode =
   | "NO_CORE_PAIRED"
+  | "CORE_PAIRING_HELD"
   | "ZONE_NOT_FOUND"
   | "ZONE_AMBIGUOUS"
   | "BROWSE_FAILED"
