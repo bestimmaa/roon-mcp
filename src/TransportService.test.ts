@@ -49,12 +49,16 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
   muteCalls: RecordedMute[];
   seekCalls: RecordedSeek[];
   settingsCalls: RecordedSettings[];
+  pauseAllCalls: () => number;
+  muteAllCalls: Array<"mute" | "unmute">;
 } {
   const controlCalls: RecordedControl[] = [];
   const volumeCalls: RecordedVolume[] = [];
   const muteCalls: RecordedMute[] = [];
   const seekCalls: RecordedSeek[] = [];
   const settingsCalls: RecordedSettings[] = [];
+  const muteAllCalls: Array<"mute" | "unmute"> = [];
+  let pauseAlls = 0;
 
   const stub = {
     waitForCore: async () => undefined,
@@ -105,13 +109,30 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         settingsCalls.push({ zone: zoneOrOutput, settings });
         cb?.(false);
       },
+      pause_all: (cb?: (e: string | false) => void) => {
+        pauseAlls++;
+        cb?.(false);
+      },
+      mute_all: (how: "mute" | "unmute", cb?: (e: string | false) => void) => {
+        muteAllCalls.push(how);
+        cb?.(false);
+      },
     }),
     getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
 
   const zoneSvc = new ZoneService(stub, undefined, defaultZone);
   const svc = new TransportService(stub, zoneSvc);
-  return { svc, controlCalls, volumeCalls, muteCalls, seekCalls, settingsCalls };
+  return {
+    svc,
+    controlCalls,
+    volumeCalls,
+    muteCalls,
+    seekCalls,
+    settingsCalls,
+    pauseAllCalls: () => pauseAlls,
+    muteAllCalls,
+  };
 }
 
 test("getNowPlaying returns a structured snapshot of a playing zone", async () => {
@@ -629,4 +650,22 @@ test("control falls back to the latest snapshot when no Changed event arrives", 
   ]);
   const out = await svc.control("z1", "resume");
   assert.equal(out.state, "paused");
+});
+
+// --- whole-house verbs / Roon Radio -----------------------------------------
+
+test("pauseAll and muteAll call the Core-wide transport verbs", async () => {
+  const { svc, pauseAllCalls, muteAllCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  assert.deepEqual(await svc.pauseAll(), { ok: true, action: "pause_all" });
+  assert.equal(pauseAllCalls(), 1);
+  assert.deepEqual(await svc.muteAll(true), { ok: true, muted: true });
+  assert.deepEqual(await svc.muteAll(false), { ok: true, muted: false });
+  assert.deepEqual(muteAllCalls, ["mute", "unmute"]);
+});
+
+test("setAutoRadio sends change_settings with the auto_radio flag", async () => {
+  const { svc, settingsCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.setAutoRadio("z1", true);
+  assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { auto_radio: true } }]);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", autoRadio: true });
 });

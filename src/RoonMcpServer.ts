@@ -549,6 +549,78 @@ export class RoonMcpServer {
         }
       },
     );
+
+    this.server.registerTool(
+      "pause_all",
+      {
+        title: "Pause playback in every Roon zone",
+        description:
+          "Use this when everything should stop at once (e.g. \"pause " +
+          "everything\"). Pauses every zone on the Core in one call. Resume " +
+          "per zone with control_playback.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return structured(await this.transport.pauseAll());
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "mute_all",
+      {
+        title: "Mute or unmute every Roon zone",
+        description:
+          "Use this to mute/unmute every room at once (e.g. \"mute the whole " +
+          "house\"). Mutes (muted:true) or unmutes every mutable output on the " +
+          "Core. Playback keeps running silently — use pause_all to actually " +
+          "stop it.",
+        inputSchema: {
+          muted: z.boolean().describe("`true` to mute every zone, `false` to unmute."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.muteAll(args.muted));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "set_auto_radio",
+      {
+        title: "Turn Roon Radio on or off for a zone",
+        description:
+          "Use this when music should keep going (or stop) after the queue " +
+          "ends (e.g. \"turn on Roon Radio\", \"stop after this album — no " +
+          "radio\"). Sets the zone's Roon Radio flag: on = Roon appends " +
+          "similar tracks when the queue runs out; off = playback stops at " +
+          "queue end. zoneId is optional and resolves like now_playing.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          enabled: z.boolean().describe("`true` to enable Roon Radio, `false` to disable."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.setAutoRadio(args.zoneId, args.enabled));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
   }
 
   async start(): Promise<void> {
