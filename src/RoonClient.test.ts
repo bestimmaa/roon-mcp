@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,5 +61,32 @@ test("stop() rejects a pending waiter instead of leaving it to time out", async 
   await assert.rejects(
     pending,
     (e) => e instanceof RoonMcpError && e.code === "NO_CORE_PAIRED",
+  );
+});
+
+test("start() surfaces CORE_PAIRING_HELD instead of contending when another live process holds the lock (issue #40)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roon-mcp-test-"));
+  const lockPath = join(dir, "instance.lock");
+  // pid 1 (init/launchd) is always alive, standing in for a live "other instance".
+  writeFileSync(lockPath, JSON.stringify({ pid: 1, startedAt: "2026-01-01T00:00:00.000Z" }));
+
+  const client = new RoonClient({ configPath: join(dir, "config.json"), lockPath, log: () => {} });
+  client.start();
+
+  await assert.rejects(
+    client.waitForCore(60_000),
+    (e) =>
+      e instanceof RoonMcpError &&
+      e.code === "CORE_PAIRING_HELD" &&
+      /pid 1/.test(e.message) &&
+      !/enable the extension/i.test(e.message),
+  );
+  assert.throws(
+    () => client.getTransport(),
+    (e) => e instanceof RoonMcpError && e.code === "CORE_PAIRING_HELD",
+  );
+  assert.throws(
+    () => client.getBrowse(),
+    (e) => e instanceof RoonMcpError && e.code === "CORE_PAIRING_HELD",
   );
 });

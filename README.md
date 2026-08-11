@@ -91,6 +91,26 @@ npm install -g roon-mcp
 - **After starting playback**, `now_playing` reflects the track that just started, not whatever was playing before.
 - **Volume** is set as a percentage (0–100) and works correctly across grouped zones.
 
+### Concurrent instances
+
+Roon pairs only one running instance of an extension at a time. Since every `roon-mcp`
+process shares the same identity and persisted pairing token, starting a second instance
+(a second MCP client session, or an orphaned process from a closed terminal) no longer
+fights the first one for the pairing slot — instead, whichever instance starts first
+claims a lock file (`instance.lock`, next to `config.json`) and every other instance
+fails fast with a `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
+flapping between paired/unpaired.
+
+MCP clients don't always reap server processes when a session ends, so orphaned
+`roon-mcp` instances can pile up and hold the lock long after their terminal is gone. If
+you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
+
+```bash
+pkill -f roon-mcp
+```
+
+The next instance you start will then acquire the lock normally.
+
 ## Assumptions
 
 - **Core language: English.** Category/action label matching (`Artists`, `Play Now`,
