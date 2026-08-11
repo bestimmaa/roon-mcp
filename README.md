@@ -83,6 +83,9 @@ npm install -g roon-mcp
 | `set_loop({ zoneId?, mode })` | Set the loop/repeat mode: `off` / `all` / `one`. |
 | `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
 | `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
+| `pause_all()` | Pause every zone on the Core in one call. Resume per zone with `control_playback`. |
+| `mute_all({ muted })` | Mute (`muted: true`) or unmute (`muted: false`) every mutable output on the Core. |
+| `set_auto_radio({ zoneId?, enabled })` | Turn Roon Radio on/off for a zone: `enabled: true` appends similar tracks once the queue ends, `false` stops playback at queue end. |
 
 ### Notes
 
