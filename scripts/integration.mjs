@@ -97,6 +97,9 @@ async function main() {
     args: [serverPath],
     cwd: repoRoot,
     stderr: "inherit",
+    // Forward the full environment so ROON_HOST/ROON_PORT/ROON_MCP_CONFIG
+    // reach the server (the SDK's default env is a filtered allowlist).
+    env: { ...process.env },
   });
   const client = new Client({ name: "roon-mcp-integration", version: "0.1.0" });
   await client.connect(transport);
