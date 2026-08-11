@@ -23,7 +23,6 @@ const MUSIC_ITEM_TYPES = [
 
 /**
  * Owns MCP startup and tool registration, and maps tool calls to services.
- * Milestone 1 ships only `list_zones`.
  */
 export class RoonMcpServer {
   private readonly server: McpServer;

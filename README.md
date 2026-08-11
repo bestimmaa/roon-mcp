@@ -66,6 +66,8 @@ npm install -g roon-mcp
 | Env var | Purpose |
 | --- | --- |
 | `ROON_DEFAULT_ZONE` | Optional fallback target for `play_now` / `enqueue_and_play` when no `zoneId` is given — a zone/output id or a display-name substring. If unset, the server falls back to the only zone, an `Office` zone, or the currently-playing zone; if it still can't decide it returns `ZONE_AMBIGUOUS` so the agent can ask. |
+| `ROON_HOST` | Optional direct-connection host for the Core's API, bypassing SOOD multicast discovery — for VLAN-segmented networks, VPNs, or containers where discovery doesn't survive. Unset (default) uses discovery as before. |
+| `ROON_PORT` | WebSocket port of the Core's API when `ROON_HOST` is set. Defaults to `9330`. |
 | `ROON_MCP_CONFIG` | Optional path for the persisted pairing token. A value ending in `.json` is the file itself; anything else is a directory to hold `config.json`. Defaults to `$XDG_CONFIG_HOME/roon-mcp/config.json` (i.e. `~/.config/roon-mcp/config.json`). |
 
 ## Tools
@@ -87,10 +89,13 @@ npm install -g roon-mcp
 | `mute_all({ muted })` | Mute (`muted: true`) or unmute (`muted: false`) every mutable output on the Core. |
 | `set_auto_radio({ zoneId?, enabled })` | Turn Roon Radio on/off for a zone: `enabled: true` appends similar tracks once the queue ends, `false` stops playback at queue end. |
 
-### Notes
+### Streaming search (genre and artist)
 
 - **Genre search** fuzzy-matches what you type — "psychedelic trance" will find the right genre even if the name isn't exact. By default results come from your library.
 - **`includeStreaming: true`** (on `type:"genre"` or `type:"artist"`) extends the search to your streaming service, so you can play artists or genres that aren't in your local collection.
+
+### Notes
+
 - **After starting playback**, `now_playing` reflects the track that just started, not whatever was playing before.
 - **Volume** is set as a percentage (0–100) and works correctly across grouped zones.
 
@@ -133,8 +138,9 @@ durable playlists are out of scope. Curated playback is delivered by `enqueue_an
 
 ## Logging
 
-Every Roon API call (`browse`, `load`, `get_zones`, `change_settings`) emits one
-structured line to **stderr** (stdout stays reserved for MCP JSON-RPC):
+Every Roon API call (`browse`, `load`, `get_zones`, `control`, `change_volume`, `mute`,
+`seek`, `change_settings`, `pause_all`, `mute_all`, …) emits one structured line to
+**stderr** (stdout stays reserved for MCP JSON-RPC):
 
 ```
 [roon-call] {"t":"2026-06-19T18:00:00.000Z","lvl":"info","op":"browse","ms":12,"params":{"hierarchy":"search","item_key":"…"},"result":{"action":"list","count":7}}
