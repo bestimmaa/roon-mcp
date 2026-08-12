@@ -25,7 +25,6 @@ const MUSIC_ITEM_TYPES = [
 
 /**
  * Owns MCP startup and tool registration, and maps tool calls to services.
- * Milestone 1 ships only `list_zones`.
  */
 export class RoonMcpServer {
   private readonly server: McpServer;
@@ -640,6 +639,244 @@ export class RoonMcpServer {
         try {
           const result = await this.transport.setLoop(args.zoneId, args.mode);
           return structured(result);
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "pause_all",
+      {
+        title: "Pause playback in every Roon zone",
+        description:
+          "Use this when everything should stop at once (e.g. \"pause " +
+          "everything\"). Pauses every zone on the Core in one call. Resume " +
+          "per zone with control_playback.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return structured(await this.transport.pauseAll());
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "mute_all",
+      {
+        title: "Mute or unmute every Roon zone",
+        description:
+          "Use this to mute/unmute every room at once (e.g. \"mute the whole " +
+          "house\"). Mutes (muted:true) or unmutes every mutable output on the " +
+          "Core. Playback keeps running silently — use pause_all to actually " +
+          "stop it.",
+        inputSchema: {
+          muted: z.boolean().describe("`true` to mute every zone, `false` to unmute."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.muteAll(args.muted));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "set_auto_radio",
+      {
+        title: "Turn Roon Radio on or off for a zone",
+        description:
+          "Use this when music should keep going (or stop) after the queue " +
+          "ends (e.g. \"turn on Roon Radio\", \"stop after this album — no " +
+          "radio\"). Sets the zone's Roon Radio flag: on = Roon appends " +
+          "similar tracks when the queue runs out; off = playback stops at " +
+          "queue end. zoneId is optional and resolves like now_playing.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          enabled: z.boolean().describe("`true` to enable Roon Radio, `false` to disable."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.setAutoRadio(args.zoneId, args.enabled));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "get_queue",
+      {
+        title: "Read a Roon zone's upcoming play queue",
+        description:
+          "Use this when the user asks what's coming up, or before editing play " +
+          "order (e.g. \"what's next?\", \"skip ahead to the Radiohead track\"). " +
+          "Returns the queue in play order: 1-based positions, title/artist/" +
+          "album, track length, and a `queueItemId` per entry for " +
+          "play_queue_item. The first entry is the currently-playing track. " +
+          "queueItemIds go stale when the queue changes; re-read before jumping. " +
+          "zoneId optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(500)
+            .optional()
+            .describe("Max queue entries to return (default 25)."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.getQueue(args.zoneId, args.limit ?? 25));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "play_queue_item",
+      {
+        title: "Jump playback to an item in the zone's queue",
+        description:
+          "Use this to skip ahead (or back) to a specific queued track without " +
+          "rebuilding the queue (e.g. \"play track 5 from the queue\"). Starts " +
+          "playback from the given queue item; the rest of the queue continues " +
+          "from there. Pass a `queueItemId` from a FRESH get_queue read — ids " +
+          "go stale when the queue changes, so re-read on failure. zoneId " +
+          "optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          queueItemId: z
+            .number()
+            .int()
+            .describe("Queue item id from a recent get_queue result."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.playFromHere(args.zoneId, args.queueItemId));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "transfer_zone",
+      {
+        title: "Move playback from one Roon zone to another",
+        description:
+          "Use this when the music should follow the user to another room " +
+          "(e.g. \"move this to the bedroom\"). Moves the playing queue — " +
+          "current track, position, and upcoming items — to the destination " +
+          "zone; the source stops. toZoneId is required (id or name " +
+          "substring); fromZoneId is optional and resolves like now_playing " +
+          "(typically the currently-playing zone).",
+        inputSchema: {
+          fromZoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Source zone id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          toZoneId: z
+            .string()
+            .min(1)
+            .describe("Destination zone id or name substring from list_zones."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.transferZone(args.fromZoneId, args.toZoneId));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "group_outputs",
+      {
+        title: "Group Roon outputs into one synchronized zone",
+        description:
+          "Use this when the user wants the same music in several rooms at " +
+          "once (e.g. \"group the kitchen and living room\", \"play this " +
+          "everywhere\"). Joins the outputs into one synchronized zone. " +
+          "Entries are zone/output ids or name substrings; a zone name " +
+          "expands to all its outputs. ORDER MATTERS: the FIRST entry's queue " +
+          "keeps playing — put the already-playing room first. Roon rejects " +
+          "hardware-incompatible groupings. Undo with ungroup_outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(2)
+            .describe(
+              "Two or more zone/output ids or name substrings. The first " +
+                "entry's queue survives the grouping.",
+            ),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "group"));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "ungroup_outputs",
+      {
+        title: "Split grouped Roon outputs back into separate zones",
+        description:
+          "Use this to stop multi-room playback (e.g. \"ungroup the " +
+          "speakers\", \"stop playing in the kitchen but keep the living " +
+          "room\"). Detaches the named outputs from their synchronized group; " +
+          "each becomes its own zone again. Entries are zone/output ids or " +
+          "name substrings; a zone name expands to all its outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe("Zone/output ids or name substrings to detach from their group."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "ungroup"));
         } catch (err) {
           return toToolError(err);
         }

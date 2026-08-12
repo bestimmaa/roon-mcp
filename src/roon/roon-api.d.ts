@@ -247,6 +247,37 @@ declare module "node-roon-api-transport" {
     zones?: never;
   }
 
+  /** One item in a zone's play queue (`subscribe_queue`). */
+  export interface RoonQueueItem {
+    queue_item_id: number;
+    /** Track length in seconds, when applicable. */
+    length?: number;
+    image_key?: string;
+    one_line?: { line1: string };
+    two_line?: { line1: string; line2?: string };
+    three_line?: { line1: string; line2?: string; line3?: string };
+  }
+
+  /** Body of a `subscribe_queue` `Subscribed` event — the queue snapshot. */
+  export interface SubscribeQueueSubscribed {
+    items?: RoonQueueItem[];
+  }
+
+  /** Body of a `subscribe_queue` `Changed` event — splice-style deltas. */
+  export interface SubscribeQueueChanged {
+    changes?: Array<{
+      operation: "insert" | "remove";
+      index?: number;
+      count?: number;
+      items?: RoonQueueItem[];
+    }>;
+  }
+
+  /** Handle returned by `subscribe_queue`; call to tear the subscription down. */
+  export interface QueueSubscription {
+    unsubscribe(cb?: (msg: unknown) => void): void;
+  }
+
   /** Lifecycle of a `subscribe_zones` subscription. */
   export type SubscribeZonesResponse =
     | "Subscribed"
@@ -314,6 +345,50 @@ declare module "node-roon-api-transport" {
       output: string | RoonOutput,
       how: "mute" | "unmute",
       cb?: (error: string | false) => void,
+    ): void;
+    /** Pause every zone. */
+    pause_all?(cb?: (error: string | false) => void): void;
+    /** Mute or unmute every mutable zone. */
+    mute_all?(how: "mute" | "unmute", cb?: (error: string | false) => void): void;
+    /** Move what's playing from one zone/output to another (queue and all). */
+    transfer_zone?(
+      fromZoneOrOutput: string,
+      toZoneOrOutput: string,
+      cb?: (error: string | false) => void,
+    ): void;
+    /** Group outputs into one synchronized zone (first output's queue wins). */
+    group_outputs?(
+      outputs: Array<string | RoonOutput>,
+      cb?: (error: string | false) => void,
+    ): void;
+    /** Break previously grouped outputs apart. */
+    ungroup_outputs?(
+      outputs: Array<string | RoonOutput>,
+      cb?: (error: string | false) => void,
+    ): void;
+    /**
+     * Subscribe to a zone's play queue. Fires `"Subscribed"` with the full
+     * item snapshot, then `"Changed"` with splice deltas. Returns a handle
+     * whose `unsubscribe()` tears the subscription down (one-shot reads
+     * subscribe, take the snapshot, and unsubscribe immediately).
+     */
+    subscribe_queue?(
+      zoneOrOutput: string | RoonApiZone | RoonOutput,
+      maxItemCount: number,
+      cb: (
+        response: "Subscribed" | "Changed" | "Unsubscribed" | string,
+        body: SubscribeQueueSubscribed & SubscribeQueueChanged,
+      ) => void,
+    ): QueueSubscription;
+    /**
+     * Start playback from a queue item (jump within the queue). NOTE: unlike
+     * the other verbs, the callback receives the RAW moo message — success is
+     * `msg?.name === "Success"`, anything else is an error.
+     */
+    play_from_here?(
+      zoneOrOutput: string,
+      queueItemId: number,
+      cb?: (msg: { name: string } | undefined, body: unknown) => void,
     ): void;
   }
 

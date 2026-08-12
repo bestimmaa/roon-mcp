@@ -1,8 +1,10 @@
 import type {
   GetZonesBody,
+  QueueSubscription,
   RoonApiTransport,
   RoonApiZone,
   RoonOutput,
+  RoonQueueItem,
   RoonZoneState,
 } from "node-roon-api-transport";
 
@@ -60,6 +62,66 @@ export interface MuteResult {
   ok: true;
   zoneId: string;
   muted: boolean;
+}
+
+/** Result of `pauseAll`. */
+export interface PauseAllResult {
+  ok: true;
+  action: "pause_all";
+}
+
+/** Result of `muteAll`. */
+export interface MuteAllResult {
+  ok: true;
+  muted: boolean;
+}
+
+/** Result of `setAutoRadio`. */
+export interface SetAutoRadioResult {
+  ok: true;
+  zoneId: string;
+  autoRadio: boolean;
+}
+
+/** Result of `transferZone`. */
+export interface TransferZoneResult {
+  ok: true;
+  fromZoneId: string;
+  toZoneId: string;
+}
+
+/** Result of `groupOutputs`. */
+export interface GroupResult {
+  ok: true;
+  action: "group" | "ungroup";
+  /** The resolved output ids the operation was applied to. */
+  outputIds: string[];
+}
+
+/** One entry in a zone's play queue (1-based position). */
+export interface QueueEntry {
+  position: number;
+  /** Opaque id for `playFromHere` — jump the queue to this item. */
+  queueItemId: number;
+  title?: string;
+  artist?: string;
+  album?: string;
+  lengthSec?: number;
+  imageKey?: string;
+}
+
+/** Result of `getQueue`. */
+export interface GetQueueResult {
+  zoneId: string;
+  entries: QueueEntry[];
+  message?: string;
+}
+
+/** Result of `playFromHere`. */
+export interface PlayFromHereResult {
+  ok: true;
+  zoneId: string;
+  queueItemId: number;
 }
 
 /**
@@ -354,6 +416,289 @@ export class TransportService {
     return { ok: true, zoneId: targetId, mode };
   }
 
+  /** Pause every zone on the Core. */
+  async pauseAll(): Promise<PauseAllResult> {
+    await this.roon.waitForCore();
+    const transport = this.roon.getTransport();
+    if (typeof transport.pause_all !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Whole-house pause is not available on this Core (pause_all unsupported).",
+      );
+    }
+    await this.logger.call(
+      "pause_all",
+      {},
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.pause_all!((error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `pause_all failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, action: "pause_all" };
+  }
+
+  /** Mute or unmute every mutable zone on the Core. */
+  async muteAll(muted: boolean): Promise<MuteAllResult> {
+    await this.roon.waitForCore();
+    const transport = this.roon.getTransport();
+    if (typeof transport.mute_all !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Whole-house mute is not available on this Core (mute_all unsupported).",
+      );
+    }
+    const how = muted ? "mute" : "unmute";
+    await this.logger.call(
+      "mute_all",
+      { how },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.mute_all!(how, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `mute_all failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, muted };
+  }
+
+  /** Turn Roon Radio (auto-radio queue continuation) on or off for a zone. */
+  async setAutoRadio(zoneId: string | undefined, enabled: boolean): Promise<SetAutoRadioResult> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const raw = await this.findRawZone(targetId);
+    if (!raw) {
+      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
+    }
+    const transport = this.roon.getTransport();
+    if (typeof transport.change_settings !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Roon Radio settings are not available on this Core (change_settings unsupported).",
+      );
+    }
+    await this.logger.call(
+      "change_settings",
+      { zoneId: targetId, settings: { auto_radio: enabled } },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.change_settings!(targetId, { auto_radio: enabled }, (error) => {
+            if (error) {
+              reject(
+                new RoonMcpError("BROWSE_FAILED", `change_settings(auto_radio) failed: ${error}`),
+              );
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, zoneId: targetId, autoRadio: enabled };
+  }
+
+  /**
+   * Read a zone's upcoming play queue via a one-shot `subscribe_queue`:
+   * subscribe, take the `Subscribed` snapshot, unsubscribe immediately.
+   * Returns 1-based positions plus the `queueItemId` each entry needs for
+   * `playFromHere`.
+   */
+  async getQueue(zoneId: string | undefined, limit = 25): Promise<GetQueueResult> {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RoonMcpError("BROWSE_FAILED", `limit must be a positive integer (got ${limit}).`);
+    }
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const transport = this.roon.getTransport();
+    if (typeof transport.subscribe_queue !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Queue read-back is not available on this Core (subscribe_queue unsupported).",
+      );
+    }
+
+    const items = await this.logger.call(
+      "subscribe_queue",
+      { zoneId: targetId, limit },
+      () =>
+        new Promise<RoonQueueItem[]>((resolve, reject) => {
+          let handle: QueueSubscription | undefined;
+          let settled = false;
+          const finish = () => {
+            // Best-effort teardown; the snapshot is already in hand.
+            try {
+              handle?.unsubscribe();
+            } catch {
+              /* connection may already be gone */
+            }
+          };
+          handle = transport.subscribe_queue!(targetId, limit, (response, body) => {
+            if (settled) return;
+            if (response === "Subscribed") {
+              settled = true;
+              finish();
+              resolve(body?.items ?? []);
+            } else if (response !== "Changed") {
+              // An error name ("NetworkError", "InvalidRequest", …) or an
+              // unexpected Unsubscribed before the snapshot landed.
+              settled = true;
+              finish();
+              reject(new RoonMcpError("BROWSE_FAILED", `subscribe_queue failed: ${response}`));
+            }
+          });
+          // The callback can fire synchronously (e.g. in tests); make sure a
+          // snapshot taken before `handle` was assigned still unsubscribes.
+          if (settled) finish();
+        }),
+      (queue) => ({ items: queue.length }),
+    );
+
+    const entries = items.map(mapQueueItem);
+    return {
+      zoneId: targetId,
+      entries,
+      ...(entries.length === 0 ? { message: "The queue is empty." } : {}),
+    };
+  }
+
+  /** Jump playback to a queue item (id from `getQueue`) without rebuilding the queue. */
+  async playFromHere(zoneId: string | undefined, queueItemId: number): Promise<PlayFromHereResult> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const transport = this.roon.getTransport();
+    if (typeof transport.play_from_here !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Queue jumping is not available on this Core (play_from_here unsupported).",
+      );
+    }
+    await this.logger.call(
+      "play_from_here",
+      { zoneId: targetId, queueItemId },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          // Unlike the other transport verbs, play_from_here hands back the raw
+          // moo message: success is msg.name === "Success".
+          transport.play_from_here!(targetId, queueItemId, (msg) => {
+            if (msg?.name === "Success") {
+              resolve();
+              return;
+            }
+            reject(
+              new RoonMcpError(
+                "BROWSE_FAILED",
+                `play_from_here failed: ${msg?.name ?? "NetworkError"} (stale queueItemId? re-read the queue).`,
+              ),
+            );
+          });
+        }),
+    );
+    return { ok: true, zoneId: targetId, queueItemId };
+  }
+
+  /** Move what's playing (queue and all) from one zone to another. */
+  async transferZone(fromZoneId: string | undefined, toZoneId: string): Promise<TransferZoneResult> {
+    const { targetId: fromId } = await this.zones.resolveTarget(fromZoneId);
+    const { targetId: toId } = await this.zones.resolveTarget(toZoneId);
+    if (fromId === toId) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Source and destination resolve to the same zone — nothing to transfer.",
+      );
+    }
+    const transport = this.roon.getTransport();
+    if (typeof transport.transfer_zone !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Zone transfer is not available on this Core (transfer_zone unsupported).",
+      );
+    }
+    await this.logger.call(
+      "transfer_zone",
+      { from: fromId, to: toId },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          transport.transfer_zone!(fromId, toId, (error) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `transfer_zone failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, fromZoneId: fromId, toZoneId: toId };
+  }
+
+  /**
+   * Group outputs into one synchronized zone, or break a group apart. Each
+   * entry resolves like any zone target (id or name substring); an entry that
+   * resolves to a whole zone expands to all of that zone's outputs. Grouping
+   * preserves the FIRST entry's queue.
+   */
+  async groupOutputs(zonesOrOutputs: string[], action: "group" | "ungroup"): Promise<GroupResult> {
+    const minimum = action === "group" ? 2 : 1;
+    if (zonesOrOutputs.length < minimum) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `${action} needs at least ${minimum} zone(s)/output(s) (got ${zonesOrOutputs.length}).`,
+      );
+    }
+
+    // Resolve every entry to concrete output ids, preserving order (the first
+    // output's queue survives a group) and dropping duplicates.
+    const outputIds: string[] = [];
+    for (const entry of zonesOrOutputs) {
+      const { targetId } = await this.zones.resolveTarget(entry);
+      const raw = await this.findRawZone(targetId);
+      if (!raw) {
+        throw new RoonMcpError("ZONE_NOT_FOUND", `Zone/output "${entry}" is no longer available.`);
+      }
+      const ids =
+        raw.zone_id === targetId
+          ? (raw.outputs ?? []).map((o) => o.output_id)
+          : [targetId];
+      for (const id of ids) {
+        if (!outputIds.includes(id)) outputIds.push(id);
+      }
+    }
+    if (action === "group" && outputIds.length < 2) {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "The entries resolve to fewer than two distinct outputs — nothing to group.",
+      );
+    }
+
+    const transport = this.roon.getTransport();
+    const fn = action === "group" ? transport.group_outputs : transport.ungroup_outputs;
+    if (typeof fn !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `Output grouping is not available on this Core (${action}_outputs unsupported).`,
+      );
+    }
+    await this.logger.call(
+      `${action}_outputs`,
+      { outputIds },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          fn.call(transport, outputIds, (error: string | false) => {
+            if (error) {
+              reject(new RoonMcpError("BROWSE_FAILED", `${action}_outputs failed: ${error}`));
+              return;
+            }
+            resolve();
+          });
+        }),
+    );
+    return { ok: true, action, outputIds };
+  }
+
   private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
     const body = await this.getZonesBody();
     return (body.zones ?? []).find(
@@ -496,6 +841,22 @@ function mapState(state: RoonZoneState | undefined): ZoneState {
     default:
       return "unknown";
   }
+}
+
+/** Map a queue item to the public entry shape (same line-picking as now-playing). */
+function mapQueueItem(item: RoonQueueItem, index: number): QueueEntry {
+  const three = item.three_line;
+  const two = item.two_line;
+  const one = item.one_line;
+  return {
+    position: index + 1,
+    queueItemId: item.queue_item_id,
+    title: three?.line1 ?? two?.line1 ?? one?.line1,
+    artist: three?.line2 ?? two?.line2,
+    album: three?.line3,
+    lengthSec: item.length,
+    imageKey: item.image_key,
+  };
 }
 
 /** Map a Roon zone (with `now_playing`) to the public `NowPlayingInfo` shape. */
