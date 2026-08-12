@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.5.0] - 2026-08-12
+
+### Added
+
+- Whole-house control: `pause_all` pauses every zone on the Core, `mute_all`
+  mutes/unmutes every mutable zone, and `set_auto_radio` turns Roon Radio
+  on/off for a zone (#38).
+- `get_queue` reads a zone's upcoming play queue (1-based positions, track
+  info, and a `queueItemId` per entry), and `play_queue_item` jumps playback
+  to one of those entries without rebuilding the queue (#36).
+- `transfer_zone` moves the playing queue from one zone to another, and
+  `group_outputs`/`ungroup_outputs` synchronize outputs into one zone or
+  split them back apart (#37).
+
+### Fixed
+
+- Concurrent `roon-mcp` instances (multiple MCP client sessions, or orphaned
+  processes from closed terminals) no longer fight over Roon's single
+  pairing slot. A single-owner lock file (`instance.lock`, next to
+  `config.json`) now makes every instance but the first fail fast with a new
+  `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
+  flapping between paired/unpaired for minutes (issue #40).
+
+### Changed
+
+- README: documented `ROON_HOST`/`ROON_PORT` (landed in 0.4.0 but never made
+  the Configuration table) and the new whole-house/queue/grouping tools;
+  fixed a dead anchor link in the `search_music` description and a stale
+  list of logged Roon API ops.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added
