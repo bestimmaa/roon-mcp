@@ -622,6 +622,80 @@ export class RoonMcpServer {
     );
 
     this.server.registerTool(
+      "get_queue",
+      {
+        title: "Read a Roon zone's upcoming play queue",
+        description:
+          "Use this when the user asks what's coming up, or before editing play " +
+          "order (e.g. \"what's next?\", \"skip ahead to the Radiohead track\"). " +
+          "Returns the queue in play order: 1-based positions, title/artist/" +
+          "album, track length, and a `queueItemId` per entry for " +
+          "play_queue_item. The first entry is the currently-playing track. " +
+          "queueItemIds go stale when the queue changes; re-read before jumping. " +
+          "zoneId optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(500)
+            .optional()
+            .describe("Max queue entries to return (default 25)."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.getQueue(args.zoneId, args.limit ?? 25));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "play_queue_item",
+      {
+        title: "Jump playback to an item in the zone's queue",
+        description:
+          "Use this to skip ahead (or back) to a specific queued track without " +
+          "rebuilding the queue (e.g. \"play track 5 from the queue\"). Starts " +
+          "playback from the given queue item; the rest of the queue continues " +
+          "from there. Pass a `queueItemId` from a FRESH get_queue read — ids " +
+          "go stale when the queue changes, so re-read on failure. zoneId " +
+          "optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          queueItemId: z
+            .number()
+            .int()
+            .describe("Queue item id from a recent get_queue result."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.transport.playFromHere(args.zoneId, args.queueItemId));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
       "transfer_zone",
       {
         title: "Move playback from one Roon zone to another",

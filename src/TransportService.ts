@@ -1,8 +1,10 @@
 import type {
   GetZonesBody,
+  QueueSubscription,
   RoonApiTransport,
   RoonApiZone,
   RoonOutput,
+  RoonQueueItem,
   RoonZoneState,
 } from "node-roon-api-transport";
 
@@ -94,6 +96,32 @@ export interface GroupResult {
   action: "group" | "ungroup";
   /** The resolved output ids the operation was applied to. */
   outputIds: string[];
+}
+
+/** One entry in a zone's play queue (1-based position). */
+export interface QueueEntry {
+  position: number;
+  /** Opaque id for `playFromHere` — jump the queue to this item. */
+  queueItemId: number;
+  title?: string;
+  artist?: string;
+  album?: string;
+  lengthSec?: number;
+  imageKey?: string;
+}
+
+/** Result of `getQueue`. */
+export interface GetQueueResult {
+  zoneId: string;
+  entries: QueueEntry[];
+  message?: string;
+}
+
+/** Result of `playFromHere`. */
+export interface PlayFromHereResult {
+  ok: true;
+  zoneId: string;
+  queueItemId: number;
 }
 
 /**
@@ -476,6 +504,103 @@ export class TransportService {
     return { ok: true, zoneId: targetId, autoRadio: enabled };
   }
 
+  /**
+   * Read a zone's upcoming play queue via a one-shot `subscribe_queue`:
+   * subscribe, take the `Subscribed` snapshot, unsubscribe immediately.
+   * Returns 1-based positions plus the `queueItemId` each entry needs for
+   * `playFromHere`.
+   */
+  async getQueue(zoneId: string | undefined, limit = 25): Promise<GetQueueResult> {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RoonMcpError("BROWSE_FAILED", `limit must be a positive integer (got ${limit}).`);
+    }
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const transport = this.roon.getTransport();
+    if (typeof transport.subscribe_queue !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Queue read-back is not available on this Core (subscribe_queue unsupported).",
+      );
+    }
+
+    const items = await this.logger.call(
+      "subscribe_queue",
+      { zoneId: targetId, limit },
+      () =>
+        new Promise<RoonQueueItem[]>((resolve, reject) => {
+          let handle: QueueSubscription | undefined;
+          let settled = false;
+          const finish = () => {
+            // Best-effort teardown; the snapshot is already in hand.
+            try {
+              handle?.unsubscribe();
+            } catch {
+              /* connection may already be gone */
+            }
+          };
+          handle = transport.subscribe_queue!(targetId, limit, (response, body) => {
+            if (settled) return;
+            if (response === "Subscribed") {
+              settled = true;
+              finish();
+              resolve(body?.items ?? []);
+            } else if (response !== "Changed") {
+              // An error name ("NetworkError", "InvalidRequest", …) or an
+              // unexpected Unsubscribed before the snapshot landed.
+              settled = true;
+              finish();
+              reject(new RoonMcpError("BROWSE_FAILED", `subscribe_queue failed: ${response}`));
+            }
+          });
+          // The callback can fire synchronously (e.g. in tests); make sure a
+          // snapshot taken before `handle` was assigned still unsubscribes.
+          if (settled) finish();
+        }),
+      (queue) => ({ items: queue.length }),
+    );
+
+    const entries = items.map(mapQueueItem);
+    return {
+      zoneId: targetId,
+      entries,
+      ...(entries.length === 0 ? { message: "The queue is empty." } : {}),
+    };
+  }
+
+  /** Jump playback to a queue item (id from `getQueue`) without rebuilding the queue. */
+  async playFromHere(zoneId: string | undefined, queueItemId: number): Promise<PlayFromHereResult> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const transport = this.roon.getTransport();
+    if (typeof transport.play_from_here !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        "Queue jumping is not available on this Core (play_from_here unsupported).",
+      );
+    }
+    await this.logger.call(
+      "play_from_here",
+      { zoneId: targetId, queueItemId },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          // Unlike the other transport verbs, play_from_here hands back the raw
+          // moo message: success is msg.name === "Success".
+          transport.play_from_here!(targetId, queueItemId, (msg) => {
+            if (msg?.name === "Success") {
+              resolve();
+              return;
+            }
+            reject(
+              new RoonMcpError(
+                "BROWSE_FAILED",
+                `play_from_here failed: ${msg?.name ?? "NetworkError"} (stale queueItemId? re-read the queue).`,
+              ),
+            );
+          });
+        }),
+    );
+    return { ok: true, zoneId: targetId, queueItemId };
+  }
+
   /** Move what's playing (queue and all) from one zone to another. */
   async transferZone(fromZoneId: string | undefined, toZoneId: string): Promise<TransferZoneResult> {
     const { targetId: fromId } = await this.zones.resolveTarget(fromZoneId);
@@ -716,6 +841,22 @@ function mapState(state: RoonZoneState | undefined): ZoneState {
     default:
       return "unknown";
   }
+}
+
+/** Map a queue item to the public entry shape (same line-picking as now-playing). */
+function mapQueueItem(item: RoonQueueItem, index: number): QueueEntry {
+  const three = item.three_line;
+  const two = item.two_line;
+  const one = item.one_line;
+  return {
+    position: index + 1,
+    queueItemId: item.queue_item_id,
+    title: three?.line1 ?? two?.line1 ?? one?.line1,
+    artist: three?.line2 ?? two?.line2,
+    album: three?.line3,
+    lengthSec: item.length,
+    imageKey: item.image_key,
+  };
 }
 
 /** Map a Roon zone (with `now_playing`) to the public `NowPlayingInfo` shape. */
