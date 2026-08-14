@@ -14,7 +14,17 @@ const pkg = require("../package.json");
 const allowedReleaseTypes = new Set(["patch", "minor", "major"]);
 const usageMessage = "Usage: npm run release -- <patch|minor|major>";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-const expectedRepoSlug = "bestimmaa/roon-mcp";
+// Derive the release target from package.json "repository" rather than a
+// hardcoded slug, so the exported remote helpers describe the package actually
+// being released instead of always naming this upstream.
+const repoUrl = typeof pkg.repository === "string" ? pkg.repository : (pkg.repository?.url ?? "");
+const repoSlugMatch = repoUrl.match(/github\.com[:/](.+?)(?:\.git)?$/i);
+if (!repoSlugMatch) {
+  throw new Error(
+    'Cannot derive the GitHub repo slug from package.json "repository" — expected a github.com URL.'
+  );
+}
+const expectedRepoSlug = repoSlugMatch[1];
 const expectedRemoteUrl = `git@github.com:${expectedRepoSlug}.git`;
 const releaseFiles = ["package.json", "package-lock.json"];
 
@@ -114,7 +124,8 @@ function ensureChangelogEntry(version) {
 }
 
 function isExpectedRemote(url) {
-  return /^github\.com[:/]bestimmaa\/roon-mcp(?:\.git)?$/i.test(url);
+  const slug = expectedRepoSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^github\\.com[:/]${slug}(?:\\.git)?$`, "i").test(url);
 }
 
 function restoreReleaseFiles() {
