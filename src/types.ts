@@ -199,6 +199,28 @@ export interface NowPlayingInfo {
   isMuted?: boolean;
 }
 
+/** Input for a library album-catalog export. */
+export interface LibraryExportInput {
+  /** Absolute path to write the snapshot JSON to; parents created, overwritten. */
+  path: string;
+  /** Optional cap on albums exported (for testing); omit/0 = unlimited. */
+  limit?: number;
+}
+
+/** Result of a library export. The albums go to the file, not in here. */
+export interface LibraryExportResult {
+  status: "ok";
+  /** Path the snapshot was written to (echoes the input). */
+  path: string;
+  albumCount: number;
+  /** Wall-clock time of the walk + write. */
+  durationMs: number;
+  /** Album count Roon reported in the list header, when available. */
+  expectedCount?: number;
+  /** Set when the collected count doesn't match what Roon reported. */
+  warning?: string;
+}
+
 export type RoonMcpErrorCode =
   | "NO_CORE_PAIRED"
   | "CORE_PAIRING_HELD"

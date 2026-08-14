@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
@@ -36,6 +37,7 @@ export class RoonMcpServer {
     private readonly tracks: TrackExpansionService,
     private readonly playback: PlaybackService,
     private readonly transport: TransportService,
+    private readonly libraryExport: LibraryExportService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -755,6 +757,41 @@ export class RoonMcpServer {
       async (args) => {
         try {
           return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "group"));
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "library_export",
+      {
+        title: "Export the Roon library album catalog to a JSON file",
+        description:
+          "Use this to snapshot the user's library albums (the deliberately-added " +
+          "collection, not listening history) as a JSON file — e.g. to hand to a " +
+          "downstream recommendation or diffing tool. Walks Library → Albums and " +
+          "writes `path` atomically (parents created, overwritten); can take tens " +
+          "of seconds on a large library. IMPORTANT: the album data goes to the " +
+          "FILE, never returned here — the result is only { status, path, " +
+          "albumCount, durationMs, expectedCount? } plus a `warning` when the " +
+          "collected count doesn't match what Roon reported.",
+        inputSchema: {
+          path: z
+            .string()
+            .min(1)
+            .describe("Absolute path to write the snapshot JSON to (parents created, overwritten)."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Optional cap on albums exported (for testing); omit for the full library."),
+        },
+      },
+      async (args) => {
+        try {
+          return structured(await this.libraryExport.export(args));
         } catch (err) {
           return toToolError(err);
         }
