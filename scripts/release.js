@@ -15,15 +15,11 @@ const allowedReleaseTypes = new Set(["patch", "minor", "major"]);
 const usageMessage = "Usage: npm run release -- <patch|minor|major>";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 // Derive the release target from package.json "repository" rather than a
-// hardcoded slug, so the exported remote helpers describe the package actually
-// being released instead of always naming this upstream. Every form npm
-// accepts is handled: "owner/repo", "github:owner/repo", and any https / ssh /
-// scp-style github.com URL, with or without a "git+" prefix, ".git" suffix,
-// trailing path, or "#fragment". A missing, non-GitHub, or unparseable value
-// yields no slug, and the helpers then report `undefined` / `false` instead of
-// failing at import time: nothing in the release flow itself consumes the
-// slug, so a fork without a GitHub "repository" must still be able to import
-// this module and release.
+// hardcoded slug, so the remote helpers describe the package actually being
+// released instead of always naming this upstream. Every form npm accepts is
+// handled: "owner/repo", "github:owner/repo", and any https / ssh / scp-style
+// github.com URL, with or without a "git+" prefix, ".git" suffix, trailing
+// path, or "#fragment". Anything else yields undefined.
 function parseGitHubRepoSlug(repository) {
   const spec = typeof repository === "string" ? repository : repository?.url;
   if (typeof spec !== "string" || spec === "") {
@@ -58,12 +54,33 @@ function parseGitHubRepoSlug(repository) {
   return `${owner}/${repo.replace(/\.git$/i, "")}`;
 }
 
-const expectedRepoSlug = parseGitHubRepoSlug(pkg.repository);
-const expectedRemoteUrl = expectedRepoSlug === undefined ? undefined : `git@github.com:${expectedRepoSlug}.git`;
-const expectedRemoteRegExp =
-  expectedRepoSlug === undefined
-    ? undefined
-    : new RegExp(`^github\\.com[:/]${expectedRepoSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\.git)?$`, "i");
+// Resolved lazily and once, so a package whose "repository" cannot be parsed
+// fails through main()'s one-line error path rather than at import time.
+let expectedRepo;
+
+function getExpectedRepo() {
+  if (expectedRepo === undefined) {
+    const slug = parseGitHubRepoSlug(pkg.repository);
+    if (slug === undefined) {
+      throw new Error(
+        "Cannot derive the GitHub repo slug from package.json \"repository\"; expected a github.com URL or owner/repo shorthand."
+      );
+    }
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expectedRepo = {
+      slug,
+      remoteUrl: `git@github.com:${slug}.git`,
+      remoteRegExp: new RegExp(`^github\\.com[:/]${escaped}(?:\\.git)?$`, "i")
+    };
+  }
+
+  return expectedRepo;
+}
+
+function getExpectedRemoteUrl() {
+  return getExpectedRepo().remoteUrl;
+}
+
 const releaseFiles = ["package.json", "package-lock.json"];
 
 function run(command, args, options = {}) {
@@ -162,7 +179,7 @@ function ensureChangelogEntry(version) {
 }
 
 function isExpectedRemote(url) {
-  return expectedRemoteRegExp !== undefined && expectedRemoteRegExp.test(url);
+  return getExpectedRepo().remoteRegExp.test(url);
 }
 
 function restoreReleaseFiles() {
@@ -240,6 +257,9 @@ function cleanupPackArtifact(packPath) {
 function main(argv = process.argv.slice(2)) {
   const releaseType = argv[0];
   ensureReleaseType(releaseType);
+  // Fail early, through the same one-line path as every other check, when
+  // the release target cannot be derived from package.json.
+  getExpectedRepo();
   ensureCleanWorktree();
   const expectedVersion = getNextVersion(releaseType);
   ensureChangelogEntry(expectedVersion);
@@ -303,8 +323,8 @@ if (isMain) {
 export {
   ensureCleanWorktree,
   ensureReleaseType,
+  getExpectedRemoteUrl,
   isExpectedRemote,
-  expectedRemoteUrl,
   main,
   parseGitHubRepoSlug
 };
