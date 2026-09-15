@@ -16,16 +16,54 @@ const usageMessage = "Usage: npm run release -- <patch|minor|major>";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 // Derive the release target from package.json "repository" rather than a
 // hardcoded slug, so the exported remote helpers describe the package actually
-// being released instead of always naming this upstream.
-const repoUrl = typeof pkg.repository === "string" ? pkg.repository : (pkg.repository?.url ?? "");
-const repoSlugMatch = repoUrl.match(/github\.com[:/](.+?)(?:\.git)?$/i);
-if (!repoSlugMatch) {
-  throw new Error(
-    'Cannot derive the GitHub repo slug from package.json "repository" — expected a github.com URL.'
-  );
+// being released instead of always naming this upstream. Every form npm
+// accepts is handled: "owner/repo", "github:owner/repo", and any https / ssh /
+// scp-style github.com URL, with or without a "git+" prefix, ".git" suffix,
+// trailing path, or "#fragment". A missing, non-GitHub, or unparseable value
+// yields no slug, and the helpers then report `undefined` / `false` instead of
+// failing at import time: nothing in the release flow itself consumes the
+// slug, so a fork without a GitHub "repository" must still be able to import
+// this module and release.
+function parseGitHubRepoSlug(repository) {
+  const spec = typeof repository === "string" ? repository : repository?.url;
+  if (typeof spec !== "string" || spec === "") {
+    return undefined;
+  }
+
+  const shorthand = spec.match(/^(?:github:)?([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:#.*)?$/);
+  if (shorthand) {
+    return `${shorthand[1]}/${shorthand[2]}`;
+  }
+
+  let url;
+  try {
+    // scp-style "git@github.com:owner/repo.git" is not a URL; rewrite it as one.
+    const normalized = spec
+      .replace(/^git\+/, "")
+      .replace(/^([\w.-]+@)?([\w.-]+):(?!\/\/)/, "ssh://$1$2/");
+    url = new URL(normalized);
+  } catch {
+    return undefined;
+  }
+
+  if (url.hostname.toLowerCase().replace(/^www\./, "") !== "github.com") {
+    return undefined;
+  }
+
+  const [owner, repo] = url.pathname.split("/").filter(Boolean);
+  if (!owner || !repo) {
+    return undefined;
+  }
+
+  return `${owner}/${repo.replace(/\.git$/i, "")}`;
 }
-const expectedRepoSlug = repoSlugMatch[1];
-const expectedRemoteUrl = `git@github.com:${expectedRepoSlug}.git`;
+
+const expectedRepoSlug = parseGitHubRepoSlug(pkg.repository);
+const expectedRemoteUrl = expectedRepoSlug === undefined ? undefined : `git@github.com:${expectedRepoSlug}.git`;
+const expectedRemoteRegExp =
+  expectedRepoSlug === undefined
+    ? undefined
+    : new RegExp(`^github\\.com[:/]${expectedRepoSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\.git)?$`, "i");
 const releaseFiles = ["package.json", "package-lock.json"];
 
 function run(command, args, options = {}) {
@@ -124,8 +162,7 @@ function ensureChangelogEntry(version) {
 }
 
 function isExpectedRemote(url) {
-  const slug = expectedRepoSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^github\\.com[:/]${slug}(?:\\.git)?$`, "i").test(url);
+  return expectedRemoteRegExp !== undefined && expectedRemoteRegExp.test(url);
 }
 
 function restoreReleaseFiles() {
@@ -268,5 +305,6 @@ export {
   ensureReleaseType,
   isExpectedRemote,
   expectedRemoteUrl,
-  main
+  main,
+  parseGitHubRepoSlug
 };
