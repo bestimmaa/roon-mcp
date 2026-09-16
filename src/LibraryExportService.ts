@@ -80,7 +80,11 @@ export class LibraryExportService {
 
   /** Navigate Library → Albums and page the whole list. Composed inside the lock. */
   private async walkAlbums(limit?: number): Promise<{ albums: SnapshotAlbum[]; expectedCount?: number }> {
-    await this.descend({ hierarchy: "browse", pop_all: true }, "the browse root");
+    // The reset's own reply is not checked: a session already at the root may
+    // answer a no-op `pop_all` with `action: "none"`, which is within contract
+    // (SearchNavigator ignores it too), and a reset that silently failed is
+    // caught by the Library lookup right below.
+    await this.browse.browse({ hierarchy: "browse", pop_all: true });
     const root = await this.browse.load({ hierarchy: "browse", offset: 0, count: PAGE });
     const library = findByTitle(root.items, LIBRARY_LABEL);
     if (!library?.item_key) {
@@ -103,6 +107,17 @@ export class LibraryExportService {
     let offset = 0;
     for (;;) {
       const page = await this.browse.load({ hierarchy: "browse", offset, count: PAGE });
+      // Roon echoes the offset it actually served. A Core that clamps an
+      // out-of-range request back to 0 would otherwise hand the first page
+      // back again — and the walk would append it forever when no total is
+      // known, or pad the snapshot with duplicates up to the advertised one.
+      if (page.offset !== offset) {
+        throw new RoonMcpError(
+          "BROWSE_FAILED",
+          `Roon served page offset ${page.offset} for requested offset ${offset}.`,
+          { requested: offset, served: page.offset },
+        );
+      }
       expectedCount ??= page.list?.count;
       for (const item of page.items) {
         if (!isAlbumRow(item)) continue;
@@ -110,23 +125,25 @@ export class LibraryExportService {
         if (limit !== undefined && albums.length >= limit) return { albums, expectedCount };
       }
       offset += page.items.length;
-      // Stop at the end of the list, or on an empty page (which guards against
-      // an off-by-one loop when the reported count is stale). An unknown total
-      // keeps paging until that empty page rather than stopping short.
+      // The list ends on a short (or empty) page, or when the known total is
+      // reached. The short-page rule bounds the walk even when Roon reported
+      // no total, so an unknown total can never page without limit.
       const total = page.list?.count ?? expectedCount;
-      if (page.items.length === 0 || (total !== undefined && offset >= total)) break;
+      if (page.items.length < PAGE || (total !== undefined && offset >= total)) break;
     }
     return { albums, expectedCount };
   }
 
   /**
-   * Drill into a browse level and confirm the session actually descended. A
-   * non-list reply (`action: "message"` on a transient Core error, or `"none"`)
-   * leaves the session where it was, so the next load would page the wrong
-   * level — and the Library menu rows all pass `isAlbumRow`, so without this
-   * check a hiccup exports ["Artists", "Albums", "Composers", ...] as the
-   * catalog with `status: "ok"`. Surfaced as INVALID_ITEM_KEY, like
-   * SearchNavigator's STALE(), so runExclusiveWithRetry replays the walk once.
+   * Drill into an item and confirm the session actually descended. A non-list
+   * reply (`action: "message"` on a transient Core error, or `"none"`) leaves
+   * the session where it was, so the next load would page the wrong level —
+   * and the Library menu rows all pass `isAlbumRow`, so without this check a
+   * hiccup exports ["Artists", "Albums", "Composers", ...] as the catalog
+   * with `status: "ok"`. Surfaced as INVALID_ITEM_KEY, like SearchNavigator's
+   * STALE(), so runExclusiveWithRetry replays the walk once. Only the
+   * `item_key` drills come through here; the root reset is deliberately not
+   * checked (see walkAlbums).
    */
   private async descend(options: BrowseOptions, where: string): Promise<BrowseResultBody> {
     const result = await this.browse.browse(options);

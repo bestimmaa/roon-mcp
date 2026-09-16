@@ -44,6 +44,10 @@ interface FakeOpts {
   messageOn?: { lib?: number; alb?: number };
   /** Reject the first load at this offset with InvalidItemKey (a stale session mid-walk). */
   staleAtOffset?: number;
+  /** Answer the root `pop_all` with `action: "none"` (a no-op reset; within contract). */
+  rootResetNone?: boolean;
+  /** Clamp an out-of-range load offset back to 0, echoing the served offset (a misbehaving Core). */
+  clampOffsets?: boolean;
 }
 
 /**
@@ -73,6 +77,7 @@ class FakeBrowse {
     if (o.pop_all) {
       this.rootResets++;
       this.level = "root";
+      if (this.opts.rootResetNone) return cb(false, { action: "none" });
       return cb(false, this.list("Explore", 6, 0));
     }
     if (o.item_key === "lib") {
@@ -111,16 +116,18 @@ class FakeBrowse {
         ),
       );
     }
-    const offset = o.offset ?? 0;
-    this.offsets.push(offset);
-    if (offset === this.opts.staleAtOffset && !this.staleFired) {
+    const requested = o.offset ?? 0;
+    this.offsets.push(requested);
+    if (requested === this.opts.staleAtOffset && !this.staleFired) {
       this.staleFired = true;
       return cb("InvalidItemKey", undefined as unknown as LoadResultBody);
     }
+    const offset = this.opts.clampOffsets && requested >= this.opts.total ? 0 : requested;
     const items: BrowseItem[] = [];
     for (let i = offset; i < Math.min(offset + (o.count ?? 100), this.opts.total); i++) {
       items.push(album(i, this.opts.bareAlbums));
     }
+    // Echoes the offset actually served, as the real load result does.
     cb(false, this.page(items, this.reported, offset));
   }
 
@@ -217,8 +224,8 @@ test("a missing list header keeps paging until an empty page, and warns that the
     assert.equal(result.albumCount, 250);
     assert.equal(result.expectedCount, undefined);
     assert.match(result.warning ?? "", /reported no album total/);
-    // The extra empty page at 250 is what terminates the walk.
-    assert.deepEqual(fake.offsets, [0, 100, 200, 250]);
+    // The short page at 200 ends the walk; no extra empty load.
+    assert.deepEqual(fake.offsets, [0, 100, 200]);
     const snap = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(snap.albums.length, 250);
   } finally {
@@ -236,7 +243,10 @@ test("a drill that does not open a list never exports the menu it was left on", 
       (e: unknown) =>
         e instanceof RoonMcpError && e.code === "INVALID_ITEM_KEY" && /Albums did not open a list/.test(e.message),
     );
-    // Retried exactly once (reset + replay), then given up.
+    // Retried exactly once (reset + replay), then given up. The reset pops the
+    // `search` hierarchy (BrowseSessionManager.resetSearchHierarchy) although
+    // this walk lives in `browse`; that is harmless only because walkAlbums
+    // re-pops `browse` itself. Pinned so a change to the reset shows up here.
     assert.equal(fake.rootResets, 2);
     assert.equal(fake.searchResets, 1);
     assert.deepEqual(fake.offsets, [], "no album page was ever loaded");
@@ -275,6 +285,80 @@ test("an INVALID_ITEM_KEY mid-walk is recovered by the reset+replay", async () =
     assert.equal(fake.rootResets, 2);
     const snap = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(snap.albums.length, 250, "no duplicates from the abandoned first walk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a Core that clamps an out-of-range offset cannot pad the snapshot with duplicates", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    // Roon advertises 300 but serves 100; the request for offset 100 comes back as page 0.
+    const { svc, fake } = build({ total: 100, reportedCount: 300, clampOffsets: true });
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) =>
+        e instanceof RoonMcpError &&
+        e.code === "BROWSE_FAILED" &&
+        /served page offset 0 for requested offset 100/.test(e.message),
+    );
+    assert.deepEqual(fake.offsets, [0, 100], "bails on the first mismatched page");
+    assert.deepEqual(readdirSync(join(path, "..")), [], "nothing was written");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a clamping Core cannot page without limit when the total is unknown either", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 100, noListHeader: true, clampOffsets: true });
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+    );
+    assert.deepEqual(fake.offsets, [0, 100], "bounded: the second load is the last");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unknown total that is an exact multiple of the page size ends on the empty page", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 200, noListHeader: true });
+    const result = await svc.export({ path });
+    assert.equal(result.albumCount, 200);
+    assert.deepEqual(fake.offsets, [0, 100, 200]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a root reset answered with action "none" is tolerated', async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 3, rootResetNone: true });
+    const result = await svc.export({ path });
+    assert.equal(result.albumCount, 3);
+    assert.equal(fake.rootResets, 1, "no replay was needed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an empty library exports an empty snapshot without a warning", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 0 });
+    const result = await svc.export({ path });
+    assert.equal(result.albumCount, 0);
+    assert.equal(result.expectedCount, 0);
+    assert.equal(result.warning, undefined);
+    assert.deepEqual(fake.offsets, [0]);
+    const snap = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(snap.albumCount, 0);
+    assert.deepEqual(snap.albums, []);
   } finally {
     cleanup();
   }
