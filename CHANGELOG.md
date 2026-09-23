@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.5.1] - 2026-09-23
+
+### Fixed
+
+- The release script now derives the GitHub repo slug from `package.json`
+  `"repository"` instead of a hardcoded `bestimmaa/roon-mcp`, so its remote
+  helpers describe the package actually being released. All npm repository
+  forms are handled (`owner/repo`, `github:owner/repo`, https/ssh/scp-style
+  URLs), and an unparseable repository now fails with the script's usual
+  one-line error and exit 1 rather than throwing at import (#43). Tooling
+  only — no change to the shipped server.
+
 ## [0.5.0] - 2026-08-12
 
 ### Added
