@@ -48,6 +48,10 @@ interface FakeOpts {
   rootResetNone?: boolean;
   /** Clamp an out-of-range load offset back to 0, echoing the served offset (a misbehaving Core). */
   clampOffsets?: boolean;
+  /** Serve at most this many items per load (a Core that caps pages below the requested count). */
+  pageCap?: number;
+  /** Serve only this many items for the load at this offset (one short page mid-list). */
+  shortPage?: { offset: number; items: number };
 }
 
 /**
@@ -123,8 +127,11 @@ class FakeBrowse {
       return cb("InvalidItemKey", undefined as unknown as LoadResultBody);
     }
     const offset = this.opts.clampOffsets && requested >= this.opts.total ? 0 : requested;
+    let count = o.count ?? 100;
+    if (this.opts.pageCap !== undefined) count = Math.min(count, this.opts.pageCap);
+    if (this.opts.shortPage?.offset === offset) count = Math.min(count, this.opts.shortPage.items);
     const items: BrowseItem[] = [];
-    for (let i = offset; i < Math.min(offset + (o.count ?? 100), this.opts.total); i++) {
+    for (let i = offset; i < Math.min(offset + count, this.opts.total); i++) {
       items.push(album(i, this.opts.bareAlbums));
     }
     // Echoes the offset actually served, as the real load result does.
@@ -224,8 +231,8 @@ test("a missing list header keeps paging until an empty page, and warns that the
     assert.equal(result.albumCount, 250);
     assert.equal(result.expectedCount, undefined);
     assert.match(result.warning ?? "", /reported no album total/);
-    // The short page at 200 ends the walk; no extra empty load.
-    assert.deepEqual(fake.offsets, [0, 100, 200]);
+    // The empty page at 250 is what ends the walk; a short page is not an end marker.
+    assert.deepEqual(fake.offsets, [0, 100, 200, 250]);
     const snap = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(snap.albums.length, 250);
   } finally {
@@ -285,6 +292,51 @@ test("an INVALID_ITEM_KEY mid-walk is recovered by the reset+replay", async () =
     assert.equal(fake.rootResets, 2);
     const snap = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(snap.albums.length, 250, "no duplicates from the abandoned first walk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a Core that caps every page below the requested count still exports the whole library", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 250, pageCap: 50 });
+    const result = await svc.export({ path });
+    assert.equal(result.albumCount, 250);
+    assert.equal(result.warning, undefined);
+    assert.deepEqual(fake.offsets, [0, 50, 100, 150, 200]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a short page mid-list does not end the walk, with or without a limit", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    // 40 items come back for the request at offset 100; the walk carries on from 140.
+    const full = build({ total: 250, shortPage: { offset: 100, items: 40 } });
+    const result = await full.svc.export({ path });
+    assert.equal(result.albumCount, 250);
+    assert.equal(result.warning, undefined);
+    assert.deepEqual(full.fake.offsets, [0, 100, 140, 240]);
+
+    const capped = build({ total: 250, shortPage: { offset: 100, items: 40 } });
+    const limited = await capped.svc.export({ path, limit: 200 });
+    assert.equal(limited.albumCount, 200, "the limit, not the short page, ends this walk");
+    assert.equal(limited.warning, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a walk that runs out of pages below its limit still warns about the shortfall", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    // Roon advertises 300 and serves 100; the limit of 200 is never reached.
+    const { svc } = build({ total: 100, reportedCount: 300 });
+    const result = await svc.export({ path, limit: 200 });
+    assert.equal(result.albumCount, 100);
+    assert.match(result.warning ?? "", /Collected 100 albums but Roon reported 300/);
   } finally {
     cleanup();
   }

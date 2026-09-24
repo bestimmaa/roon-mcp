@@ -51,7 +51,7 @@ export class LibraryExportService {
     // One exclusive browse sequence for the whole walk. Item keys are produced
     // inside it, so a stale session mid-walk — an INVALID_ITEM_KEY from a load,
     // or a drill that fails to open its list — is replayed once from the root.
-    const { albums, expectedCount } = await this.browse.runExclusiveWithRetry(() =>
+    const { albums, expectedCount, stoppedAtLimit } = await this.browse.runExclusiveWithRetry(() =>
       this.walkAlbums(limit),
     );
 
@@ -65,8 +65,9 @@ export class LibraryExportService {
     };
     writeAtomic(input.path, JSON.stringify(snapshot, null, 2));
 
-    // Only meaningful for an un-capped export; a `limit` legitimately stops short.
-    const warning = limit === undefined ? countWarning(albums.length, expectedCount) : undefined;
+    // A walk that stopped because it reached `limit` is legitimately short; one
+    // that ran out of pages first is a mismatch whether or not a limit was set.
+    const warning = stoppedAtLimit ? undefined : countWarning(albums.length, expectedCount);
 
     return {
       status: "ok",
@@ -79,7 +80,9 @@ export class LibraryExportService {
   }
 
   /** Navigate Library → Albums and page the whole list. Composed inside the lock. */
-  private async walkAlbums(limit?: number): Promise<{ albums: SnapshotAlbum[]; expectedCount?: number }> {
+  private async walkAlbums(
+    limit?: number,
+  ): Promise<{ albums: SnapshotAlbum[]; expectedCount?: number; stoppedAtLimit: boolean }> {
     // The reset's own reply is not checked: a session already at the root may
     // answer a no-op `pop_all` with `action: "none"`, which is within contract
     // (SearchNavigator ignores it too), and a reset that silently failed is
@@ -111,6 +114,10 @@ export class LibraryExportService {
       // out-of-range request back to 0 would otherwise hand the first page
       // back again — and the walk would append it forever when no total is
       // known, or pad the snapshot with duplicates up to the advertised one.
+      // This check is also what bounds the loop, so it stays strict: `offset`
+      // is required by the load contract, and a Core that omits it must fail
+      // loudly here rather than be skipped, or a Core that both clamps and
+      // omits it would loop again. BROWSE_FAILED is not retried.
       if (page.offset !== offset) {
         throw new RoonMcpError(
           "BROWSE_FAILED",
@@ -122,16 +129,20 @@ export class LibraryExportService {
       for (const item of page.items) {
         if (!isAlbumRow(item)) continue;
         albums.push(toSnapshotAlbum(item));
-        if (limit !== undefined && albums.length >= limit) return { albums, expectedCount };
+        if (limit !== undefined && albums.length >= limit) {
+          return { albums, expectedCount, stoppedAtLimit: true };
+        }
       }
       offset += page.items.length;
-      // The list ends on a short (or empty) page, or when the known total is
-      // reached. The short-page rule bounds the walk even when Roon reported
-      // no total, so an unknown total can never page without limit.
+      // Stop at the end of the list, or on an empty page (which guards against
+      // an off-by-one loop when the reported count is stale). An unknown total
+      // keeps paging until that empty page. A short page is NOT an end marker:
+      // the browse API never promises a full page mid-list, so stopping on one
+      // would silently truncate a Core that serves fewer items than requested.
       const total = page.list?.count ?? expectedCount;
-      if (page.items.length < PAGE || (total !== undefined && offset >= total)) break;
+      if (page.items.length === 0 || (total !== undefined && offset >= total)) break;
     }
-    return { albums, expectedCount };
+    return { albums, expectedCount, stoppedAtLimit: false };
   }
 
   /**
