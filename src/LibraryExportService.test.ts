@@ -491,6 +491,26 @@ test("refuses to overwrite an existing file that is not a snapshot, before walki
   }
 });
 
+test("re-checks before writing, so a file created during the walk is not overwritten", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 3 });
+    const load = fake.load.bind(fake);
+    fake.load = (o, cb) => {
+      if (fake.level === "albums") writeFileSync(path, "precious");
+      load(o, cb);
+    };
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) => e instanceof RoonMcpError && e.code === "EXPORT_PATH_REFUSED",
+    );
+    assert.equal(readFileSync(path, "utf8"), "precious", "the file is untouched");
+    assert.deepEqual(readdirSync(join(path, "..")), ["snapshot.json"], "no .tmp left behind");
+  } finally {
+    cleanup();
+  }
+});
+
 test("refuses a damaged earlier snapshot rather than guessing it is safe", async () => {
   const { path, cleanup } = tempPath();
   try {

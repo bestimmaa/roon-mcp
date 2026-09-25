@@ -71,6 +71,9 @@ export class LibraryExportService {
       albumCount: albums.length,
       albums,
     };
+    // Again right before the write: the walk can take tens of seconds, and a
+    // file that appeared at `path` meanwhile gets the same protection.
+    assertReplaceable(input.path);
     writeAtomic(input.path, JSON.stringify(snapshot, null, 2));
 
     // A walk that stopped because it reached `limit` is legitimately short; one
