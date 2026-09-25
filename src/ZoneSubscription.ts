@@ -31,11 +31,10 @@ interface PendingWaiter {
 }
 
 /**
- * Resolves a zone from a snapshot by id or by any of its output ids — same
- * predicate the read services use, kept here so waiters don't have to know
- * about output ids.
+ * Resolves a zone from a snapshot by id or by any of its output ids. Roon
+ * playback actions accept either, so every zone lookup goes through here.
  */
-function findZone(
+export function findZone(
   body: GetZonesBody,
   idOrOutput: string,
 ): RoonApiZone | undefined {
@@ -46,6 +45,31 @@ function findZone(
   );
 }
 
+/** The display lines Roon attaches to a now-playing track or queue item. */
+interface DisplayLines {
+  one_line?: { line1?: string };
+  two_line?: { line1?: string; line2?: string };
+  three_line?: { line1?: string; line2?: string; line3?: string };
+}
+
+/**
+ * Pick title/artist/album from Roon's display lines: prefer three-line
+ * (artist + album), fall back to two-line (artist only), then one-line.
+ */
+export function trackLines(lines: DisplayLines | undefined): {
+  title?: string;
+  artist?: string;
+  album?: string;
+} {
+  const three = lines?.three_line;
+  const two = lines?.two_line;
+  return {
+    title: three?.line1 ?? two?.line1 ?? lines?.one_line?.line1,
+    artist: three?.line2 ?? two?.line2,
+    album: three?.line3,
+  };
+}
+
 /** Build a fingerprint for the named zone in the given snapshot. */
 export function fingerprintFor(
   body: GetZonesBody,
@@ -53,13 +77,7 @@ export function fingerprintFor(
 ): ZoneFingerprint | undefined {
   const z = findZone(body, idOrOutput);
   if (!z) return undefined;
-  const np = z.now_playing;
-  return {
-    state: z.state,
-    title: np?.three_line?.line1 ?? np?.two_line?.line1 ?? np?.one_line?.line1,
-    artist: np?.three_line?.line2 ?? np?.two_line?.line2,
-    album: np?.three_line?.line3,
-  };
+  return { state: z.state, ...trackLines(z.now_playing) };
 }
 
 function fingerprintEquals(a: ZoneFingerprint, b: ZoneFingerprint): boolean {
@@ -104,6 +122,9 @@ export class ZoneSubscription {
           zones_changed?: RoonApiZone[];
           zones_removed?: string[];
         };
+        // Seek-only ticks (~1/s per playing zone) carry no added/changed/removed
+        // zones and can't move a fingerprint, so skip the rebuild.
+        if (!b.zones_added && !b.zones_changed && !b.zones_removed) return;
         if (!this.snapshot) this.snapshot = { zones: [] };
         const current = new Map(
           (this.snapshot.zones ?? []).map((z) => [z.zone_id, z]),

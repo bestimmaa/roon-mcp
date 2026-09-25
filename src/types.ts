@@ -1,14 +1,17 @@
 // Public domain types shared across services and MCP tool boundaries.
 // Kept aligned with the implementation plan's TypeScript interfaces.
 
-export type MusicItemType =
-  | "artist"
-  | "album"
-  | "track"
-  | "genre"
-  | "playlist"
-  | "radio"
-  | "unknown";
+export const MUSIC_ITEM_TYPES = [
+  "artist",
+  "album",
+  "track",
+  "genre",
+  "playlist",
+  "radio",
+  "unknown",
+] as const;
+
+export type MusicItemType = (typeof MUSIC_ITEM_TYPES)[number];
 
 export type ZoneState = "playing" | "paused" | "stopped" | "loading" | "unknown";
 
@@ -105,33 +108,17 @@ export interface EnqueueAndPlayOutput extends PlaybackResult {
   requested: number;
 }
 
-/** Verb for the `control_playback` tool. `resume` maps to Roon's `play`. */
-export type TransportAction =
-  | "pause"
-  | "resume"
-  | "next"
-  | "previous"
-  | "stop"
-  | "playpause";
+/** Verbs for the `control_playback` tool. `resume` maps to Roon's `play`. */
+export const TRANSPORT_ACTIONS = [
+  "pause",
+  "resume",
+  "next",
+  "previous",
+  "stop",
+  "playpause",
+] as const;
 
-export interface ControlPlaybackInput {
-  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
-  zoneId?: string;
-  action: TransportAction;
-}
-
-export interface SeekInput {
-  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
-  zoneId?: string;
-  /**
-   * Target seek position in seconds. In `absolute` mode this is the position
-   * to seek to (0 = start); in `relative` mode it is a forward/backward delta
-   * (negative skips backward).
-   */
-  seconds: number;
-  /** `absolute` (default) sets the position; `relative` moves by a delta. */
-  mode?: "absolute" | "relative";
-}
+export type TransportAction = (typeof TRANSPORT_ACTIONS)[number];
 
 export interface SeekResult {
   ok: true;
@@ -145,32 +132,10 @@ export interface SeekResult {
 /** Loop/repeat mode for the `set_loop` tool. */
 export type LoopMode = "off" | "all" | "one";
 
-export interface SetLoopInput {
-  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
-  zoneId?: string;
-  mode: LoopMode;
-}
-
 export interface SetLoopResult {
   ok: true;
   zoneId: string;
   mode: LoopMode;
-}
-
-export interface SetVolumeInput {
-  zoneId?: string;
-  /**
-   * Target volume in percent (0 = silent, 100 = max). The server rescales
-   * to each output's native range, so a single value works across mixed
-   * devices in a grouped zone.
-   */
-  level: number;
-}
-
-export interface MuteInput {
-  zoneId?: string;
-  /** `true` to mute, `false` to unmute. */
-  muted: boolean;
 }
 
 /**
@@ -231,11 +196,9 @@ export type RoonMcpErrorCode =
   | "ZONE_AMBIGUOUS"
   | "BROWSE_FAILED"
   | "INVALID_ITEM_KEY"
-  | "NO_SEARCH_RESULTS"
   | "NO_PLAYABLE_ITEMS"
   | "NO_PLAY_ACTION"
   | "ACTION_FAILED"
-  | "PARTIAL_QUEUE"
   | "EXPORT_PATH_REFUSED"
   | "INTERNAL_ERROR";
 

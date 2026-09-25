@@ -3,7 +3,6 @@ import type { BrowseHierarchy, BrowseItem, BrowseResultBody } from "node-roon-ap
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import {
   decodeLocator,
-  hierarchyForLocator,
   isGenreLocator,
   type GenreLocator,
   type Locator,
@@ -11,19 +10,27 @@ import {
 } from "./locator.js";
 import { RoonMcpError } from "./types.js";
 
-export { hierarchyForLocator } from "./locator.js";
-
 // Flat-search results live in the "search" hierarchy; we re-navigate there.
 export const SEARCH_HIERARCHY: BrowseHierarchy = "search";
 // Genre nodes live in the dedicated "genres" hierarchy.
-const GENRES_HIERARCHY: BrowseHierarchy = "genres";
+export const GENRES_HIERARCHY: BrowseHierarchy = "genres";
 // Load generously when re-resolving so a locator index is never cut off by a
 // short page (search itself may have collected with a small `limit`).
 const RESOLVE_COUNT = 100;
 
+/** Case/whitespace-insensitive form for comparing Roon titles and labels. */
+export function normalize(text: string): string {
+  return text.trim().toLowerCase();
+}
+
 /** A selectable browse entry: has a key and isn't a header. */
 export function isSelectable(item: BrowseItem): boolean {
   return Boolean(item.item_key) && item.hint !== "header";
+}
+
+/** A navigable sub-list to drill into (an album, a genre, a "Top Tracks" container). */
+export function isContainer(item: BrowseItem): boolean {
+  return Boolean(item.item_key) && item.hint === "list";
 }
 
 const STALE = () =>
@@ -94,10 +101,8 @@ export class SearchNavigator {
         offset: 0,
         count: RESOLVE_COUNT,
       });
-      const target = name.trim().toLowerCase();
-      const node = level.items
-        .filter(isSelectable)
-        .find((i) => i.title.trim().toLowerCase() === target);
+      const target = normalize(name);
+      const node = level.items.filter(isSelectable).find((i) => normalize(i.title) === target);
       if (!node?.item_key) throw STALE();
 
       last = await this.browse.browse({ hierarchy: GENRES_HIERARCHY, item_key: node.item_key });
@@ -106,12 +111,6 @@ export class SearchNavigator {
 
     if (!last) throw STALE();
     return last;
-  }
-
-  /** Load the children of the currently-opened item (its actions or sub-list). */
-  async loadCurrent(count = RESOLVE_COUNT): Promise<BrowseItem[]> {
-    const loaded = await this.browse.load({ hierarchy: SEARCH_HIERARCHY, offset: 0, count });
-    return loaded.items;
   }
 }
 

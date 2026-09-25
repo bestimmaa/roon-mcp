@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import type { BrowseItem, BrowseOptions, BrowseResultBody } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { isContainer, normalize } from "./SearchNavigator.js";
 import { RoonMcpError, type LibraryExportInput, type LibraryExportResult } from "./types.js";
 
 // Page size for walking the Albums list. A 2.7k-album library pages in ~28 loads.
@@ -138,7 +139,7 @@ export class LibraryExportService {
       }
       expectedCount ??= page.list?.count;
       for (const item of page.items) {
-        if (!isAlbumRow(item)) continue;
+        if (!isContainer(item)) continue;
         albums.push(toSnapshotAlbum(item));
         if (limit !== undefined && albums.length >= limit) {
           return { albums, expectedCount, stoppedAtLimit: true };
@@ -160,7 +161,7 @@ export class LibraryExportService {
    * Drill into an item and confirm the session actually descended. A non-list
    * reply (`action: "message"` on a transient Core error, or `"none"`) leaves
    * the session where it was, so the next load would page the wrong level —
-   * and the Library menu rows all pass `isAlbumRow`, so without this check a
+   * and the Library menu rows all pass `isContainer`, so without this check a
    * hiccup exports ["Artists", "Albums", "Composers", ...] as the catalog
    * with `status: "ok"`. Surfaced as INVALID_ITEM_KEY, like SearchNavigator's
    * STALE(), so runExclusiveWithRetry replays the walk once. Only the
@@ -241,14 +242,9 @@ function writeAtomic(path: string, data: string): void {
   }
 }
 
-/** An album row in the Albums list: a drillable `list` item with a key. */
-function isAlbumRow(item: BrowseItem): boolean {
-  return Boolean(item.item_key) && item.hint === "list";
-}
-
 /** Case-insensitive exact-title match among loaded browse items. */
 function findByTitle(items: BrowseItem[], title: string): BrowseItem | undefined {
-  return items.find((i) => i.title.trim().toLowerCase() === title);
+  return items.find((i) => normalize(i.title) === title);
 }
 
 function toSnapshotAlbum(item: BrowseItem): SnapshotAlbum {

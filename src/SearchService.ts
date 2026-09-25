@@ -1,12 +1,11 @@
 import type { BrowseItem } from "node-roon-api-browse";
 
-import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { BrowseSessionManager, isStaleSession } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { encodeLocator } from "./locator.js";
-import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
+import { SEARCH_HIERARCHY, isSelectable, normalize } from "./SearchNavigator.js";
 import { perAlbumBudget, TrackExpansionService } from "./TrackExpansionService.js";
 import {
-  RoonMcpError,
   type MusicCandidate,
   type MusicItemType,
   type SearchMusicInput,
@@ -30,10 +29,6 @@ const GROUP_TITLE_TO_TYPE: Record<string, MusicItemType> = {
   stations: "radio",
   "internet radio": "radio",
 };
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
 
 /** Strip a trailing count, e.g. "Albums (12)" → "albums". */
 function groupTitleToType(title: string): MusicItemType {
@@ -238,20 +233,17 @@ export class SearchService {
     }
 
     let broadened = false;
-    let candidates = await this.collectFromGroups(
-      input.query,
-      groups,
-      this.selectGroupIndices(groups, input.type),
-      limit,
-    );
+    const typedIndices = this.selectGroupIndices(groups, input.type);
+    let candidates = await this.collectFromGroups(input.query, groups, typedIndices, limit);
 
-    // If a typed search came back empty, broaden to all categories.
+    // If a typed search came back empty, broaden to the remaining categories
+    // (the typed ones just yielded nothing, so re-scanning them is wasted).
     if (candidates.length === 0 && input.type) {
       broadened = true;
       candidates = await this.collectFromGroups(
         input.query,
         groups,
-        groups.map((_, idx) => idx),
+        groups.map((_, idx) => idx).filter((idx) => !typedIndices.includes(idx)),
         limit,
       );
     }
@@ -327,7 +319,7 @@ export class SearchService {
         await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, pop_levels: 1 });
       } catch (err) {
         // A single bad group shouldn't sink the whole search.
-        if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") continue;
+        if (isStaleSession(err)) continue;
         throw err;
       }
     }
