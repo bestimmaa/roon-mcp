@@ -4,6 +4,7 @@ import { test } from "node:test";
 import pkg from "../package.json" with { type: "json" };
 
 import { RoonMcpServer } from "./RoonMcpServer.js";
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
@@ -24,6 +25,7 @@ function buildServer(): RoonMcpServer {
     {} as unknown as TrackExpansionService,
     {} as unknown as PlaybackService,
     {} as unknown as TransportService,
+    {} as unknown as LibraryExportService,
   );
 }
 
