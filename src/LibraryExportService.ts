@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { BrowseItem, BrowseOptions, BrowseResultBody } from "node-roon-api-browse";
@@ -9,6 +9,10 @@ import { RoonMcpError, type LibraryExportInput, type LibraryExportResult } from 
 
 // Page size for walking the Albums list. A 2.7k-album library pages in ~28 loads.
 const PAGE = 100;
+
+// An existing file larger than this is never read to check whether it is a
+// snapshot; it is refused outright. A 2.7k-album snapshot is ~1 MB.
+const MAX_REPLACEABLE_BYTES = 64 * 1024 * 1024;
 
 // English container labels for the Library → Albums walk. Same localization
 // caveat already documented for SearchService.GROUP_TITLE_TO_TYPE,
@@ -47,6 +51,10 @@ export class LibraryExportService {
   async export(input: LibraryExportInput): Promise<LibraryExportResult> {
     const startedAt = Date.now();
     const limit = input.limit != null && input.limit > 0 ? input.limit : undefined;
+
+    // Checked before the walk, so a refused path fails fast instead of after
+    // holding the browse session for the whole library.
+    assertReplaceable(input.path);
 
     // One exclusive browse sequence for the whole walk. Item keys are produced
     // inside it, so a stale session mid-walk — an INVALID_ITEM_KEY from a load,
@@ -179,6 +187,45 @@ function countWarning(collected: number, expected: number | undefined): string |
     return `Roon reported no album total; collected ${collected} albums by paging until an empty page.`;
   }
   return collected !== expected ? `Collected ${collected} albums but Roon reported ${expected}.` : undefined;
+}
+
+/**
+ * Refuse to overwrite an existing file unless it is an earlier snapshot from
+ * this tool. `path` comes from the agent, so without this an export aimed at
+ * the wrong place could clobber any file the user can write — a shell rc
+ * file, or roon-mcp's own config.json with its pairing token. A path that
+ * does not exist yet is fine, and so is a non-file (e.g. a directory): the
+ * rename in writeAtomic fails on it without touching anything.
+ */
+function assertReplaceable(path: string): void {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return; // does not exist (or unreadable, which the write will surface)
+  }
+  if (!stats.isFile()) return;
+  if (stats.size <= MAX_REPLACEABLE_BYTES && isSnapshot(path)) return;
+  throw new RoonMcpError(
+    "EXPORT_PATH_REFUSED",
+    `Refusing to overwrite ${path}: a file already exists there and it is not a ` +
+      "library_export snapshot (or it is one that has been damaged or hand-edited). " +
+      "Nothing was written. To fix: retry with a path that does not exist yet, or " +
+      "ask the user to check the file and delete it if it is safe to replace. Do not " +
+      "retry the same path until then.",
+    { path },
+  );
+}
+
+function isSnapshot(path: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null) return false;
+    const snap = parsed as Record<string, unknown>;
+    return snap.source === "roon" && snap.kind === "albums" && typeof snap.schemaVersion === "number";
+  } catch {
+    return false;
+  }
 }
 
 /**

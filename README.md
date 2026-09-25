@@ -88,7 +88,7 @@ npm install -g roon-mcp
 | `pause_all()` | Pause every zone on the Core in one call. Resume per zone with `control_playback`. |
 | `mute_all({ muted })` | Mute (`muted: true`) or unmute (`muted: false`) every mutable output on the Core. |
 | `set_auto_radio({ zoneId?, enabled })` | Turn Roon Radio on/off for a zone: `enabled: true` appends similar tracks once the queue ends, `false` stops playback at queue end. |
-| `library_export({ path, limit? })` | Walk Library → Albums and write the album catalog to `path` as JSON (written atomically; parents created). The albums go to the **file** — the result carries only counts and timings. Can take tens of seconds on a large library, and holds the browse session for the whole walk (search/play calls wait behind it). |
+| `library_export({ path, limit? })` | Walk Library → Albums and write the album catalog to `path` as JSON (written atomically; parents created; an existing file is only replaced if it is an earlier snapshot). The albums go to the **file** — the result carries only counts and timings. Can take tens of seconds on a large library, and holds the browse session for the whole walk (search/play calls wait behind it). |
 
 ### Streaming search (genre and artist)
 

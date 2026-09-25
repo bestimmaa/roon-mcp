@@ -201,7 +201,10 @@ export interface NowPlayingInfo {
 
 /** Input for a library album-catalog export. */
 export interface LibraryExportInput {
-  /** Absolute path to write the snapshot JSON to; parents created, overwritten. */
+  /**
+   * Absolute path to write the snapshot JSON to; parents created. An existing
+   * file is only replaced when it is an earlier library_export snapshot.
+   */
   path: string;
   /** Optional cap on albums exported (for testing); omit/0 = unlimited. */
   limit?: number;
@@ -233,6 +236,7 @@ export type RoonMcpErrorCode =
   | "NO_PLAY_ACTION"
   | "ACTION_FAILED"
   | "PARTIAL_QUEUE"
+  | "EXPORT_PATH_REFUSED"
   | "INTERNAL_ERROR";
 
 export class RoonMcpError extends Error {
