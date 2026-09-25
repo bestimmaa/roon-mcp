@@ -772,7 +772,9 @@ export class RoonMcpServer {
           "Use this to snapshot the user's library albums (the deliberately-added " +
           "collection, not listening history) as a JSON file — e.g. to hand to a " +
           "downstream recommendation or diffing tool. Walks Library → Albums and " +
-          "writes `path` atomically (parents created, overwritten); can take tens " +
+          "writes `path` atomically (parents created); an existing file is only " +
+          "replaced if it is an earlier snapshot, anything else is refused " +
+          "with EXPORT_PATH_REFUSED. Can take tens " +
           "of seconds on a large library, and holds the browse session for the " +
           "whole walk, so search_music, get_tracks_for and play_now wait behind " +
           "it — don't run it mid-listening-session. IMPORTANT: the album data goes to the " +
@@ -784,7 +786,10 @@ export class RoonMcpServer {
             .string()
             .min(1)
             .refine((p) => isAbsolute(p), { message: "path must be absolute" })
-            .describe("Absolute path to write the snapshot JSON to (parents created, overwritten)."),
+            .describe(
+              "Absolute path to write the snapshot JSON to (parents created). " +
+                "An existing file is only replaced if it is an earlier snapshot.",
+            ),
           limit: z
             .number()
             .int()

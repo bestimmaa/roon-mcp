@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -465,6 +465,90 @@ test("omits artist/imageKey when the browse item lacks them", async () => {
       album: "Album 0",
       raw: { title: "Album 0", itemKey: "70:0" },
     });
+  } finally {
+    cleanup();
+  }
+});
+
+test("refuses to overwrite an existing file that is not a snapshot, before walking", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    writeFileSync(path, '{"token":"secret"}');
+    const { svc, fake } = build({ total: 3 });
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) =>
+        e instanceof RoonMcpError &&
+        e.code === "EXPORT_PATH_REFUSED" &&
+        /path that does not exist yet/.test(e.message) &&
+        /ask the user/.test(e.message),
+    );
+    assert.equal(readFileSync(path, "utf8"), '{"token":"secret"}', "the file is untouched");
+    assert.equal(fake.rootResets, 0, "refused before the browse session was taken");
+    assert.deepEqual(readdirSync(join(path, "..")), ["snapshot.json"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("re-checks before writing, so a file created during the walk is not overwritten", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    const { svc, fake } = build({ total: 3 });
+    const load = fake.load.bind(fake);
+    fake.load = (o, cb) => {
+      if (fake.level === "albums") writeFileSync(path, "precious");
+      load(o, cb);
+    };
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) => e instanceof RoonMcpError && e.code === "EXPORT_PATH_REFUSED",
+    );
+    assert.equal(readFileSync(path, "utf8"), "precious", "the file is untouched");
+    assert.deepEqual(readdirSync(join(path, "..")), ["snapshot.json"], "no .tmp left behind");
+  } finally {
+    cleanup();
+  }
+});
+
+test("refuses a damaged earlier snapshot rather than guessing it is safe", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    await build({ total: 3 }).svc.export({ path });
+    const truncated = readFileSync(path, "utf8").slice(0, 40);
+    writeFileSync(path, truncated);
+    await assert.rejects(
+      () => build({ total: 3 }).svc.export({ path }),
+      (e: unknown) => e instanceof RoonMcpError && e.code === "EXPORT_PATH_REFUSED" && /damaged/.test(e.message),
+    );
+    assert.equal(readFileSync(path, "utf8"), truncated);
+  } finally {
+    cleanup();
+  }
+});
+
+test("refuses to overwrite a non-JSON file", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    writeFileSync(path, "export PATH=/usr/bin\n");
+    const { svc } = build({ total: 3 });
+    await assert.rejects(
+      () => svc.export({ path }),
+      (e: unknown) => e instanceof RoonMcpError && e.code === "EXPORT_PATH_REFUSED",
+    );
+    assert.equal(readFileSync(path, "utf8"), "export PATH=/usr/bin\n");
+  } finally {
+    cleanup();
+  }
+});
+
+test("replaces an earlier snapshot at the same path", async () => {
+  const { path, cleanup } = tempPath();
+  try {
+    await build({ total: 3 }).svc.export({ path });
+    const result = await build({ total: 5 }).svc.export({ path });
+    assert.equal(result.albumCount, 5);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).albums.length, 5);
   } finally {
     cleanup();
   }
