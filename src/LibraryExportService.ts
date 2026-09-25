@@ -201,13 +201,8 @@ function countWarning(collected: number, expected: number | undefined): string |
  * rename in writeAtomic fails on it without touching anything.
  */
 function assertReplaceable(path: string): void {
-  let stats;
-  try {
-    stats = statSync(path);
-  } catch {
-    return; // does not exist (or unreadable, which the write will surface)
-  }
-  if (!stats.isFile()) return;
+  const stats = statSync(path, { throwIfNoEntry: false });
+  if (!stats?.isFile()) return;
   if (stats.size <= MAX_REPLACEABLE_BYTES && isSnapshot(path)) return;
   throw new RoonMcpError(
     "EXPORT_PATH_REFUSED",
@@ -222,10 +217,8 @@ function assertReplaceable(path: string): void {
 
 function isSnapshot(path: string): boolean {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed !== "object" || parsed === null) return false;
-    const snap = parsed as Record<string, unknown>;
-    return snap.source === "roon" && snap.kind === "albums" && typeof snap.schemaVersion === "number";
+    const snap = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown> | null;
+    return snap?.source === "roon" && snap.kind === "albums" && typeof snap.schemaVersion === "number";
   } catch {
     return false;
   }
