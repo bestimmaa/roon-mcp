@@ -233,17 +233,24 @@ export class SearchService {
     }
 
     let broadened = false;
-    const typedIndices = this.selectGroupIndices(groups, input.type);
-    let candidates = await this.collectFromGroups(input.query, groups, typedIndices, limit);
+    const scanned = new Set<number>();
+    let candidates = await this.collectFromGroups(
+      input.query,
+      groups,
+      this.selectGroupIndices(groups, input.type),
+      limit,
+      scanned,
+    );
 
-    // If a typed search came back empty, broaden to the remaining categories
-    // (the typed ones just yielded nothing, so re-scanning them is wasted).
+    // If a typed search came back empty, broaden to all categories. Groups the
+    // typed pass fully scanned yielded nothing, so skip them; a group that
+    // failed with a stale session is retried.
     if (candidates.length === 0 && input.type) {
       broadened = true;
       candidates = await this.collectFromGroups(
         input.query,
         groups,
-        groups.map((_, idx) => idx).filter((idx) => !typedIndices.includes(idx)),
+        groups.map((_, idx) => idx).filter((idx) => !scanned.has(idx)),
         limit,
       );
     }
@@ -282,6 +289,8 @@ export class SearchService {
     groups: BrowseItem[],
     indices: number[],
     limit: number,
+    /** Receives each group index that was scanned without error. */
+    scanned?: Set<number>,
   ): Promise<MusicCandidate[]> {
     const out: MusicCandidate[] = [];
     for (const g of indices) {
@@ -291,7 +300,10 @@ export class SearchService {
         const nav = await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: group.item_key });
         // action:"none" means Roon didn't push a new level (e.g. a "No Results"
         // placeholder item) — nothing to load and nothing to pop.
-        if (nav.action !== "list") continue;
+        if (nav.action !== "list") {
+          scanned?.add(g);
+          continue;
+        }
         const loaded = await this.browse.load({
           hierarchy: SEARCH_HIERARCHY,
           offset: 0,
@@ -317,6 +329,7 @@ export class SearchService {
         // item_keys are level-scoped: pop back to the group list before the
         // next group so its keys stay valid.
         await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, pop_levels: 1 });
+        scanned?.add(g);
       } catch (err) {
         // A single bad group shouldn't sink the whole search.
         if (isStaleSession(err)) continue;
