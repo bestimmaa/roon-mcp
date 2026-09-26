@@ -1,31 +1,26 @@
 import type {
-  GetZonesBody,
   QueueSubscription,
   RoonApiTransport,
   RoonApiZone,
+  RoonControlVerb,
   RoonOutput,
   RoonQueueItem,
-  RoonZoneState,
 } from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
-import { fingerprintFor, ZoneSubscription } from "./ZoneSubscription.js";
+import { findZone, fingerprintFor, trackLines } from "./ZoneSubscription.js";
 import {
   RoonMcpError,
+  TRANSPORT_ACTIONS,
   type LoopMode,
   type NowPlayingInfo,
   type SeekResult,
   type SetLoopResult,
+  type TransportAction,
   type ZoneState,
 } from "./types.js";
-import { ZoneService } from "./ZoneService.js";
-
-/**
- * Roon `control` verbs accepted by `transport.control(zone, control, cb)`.
- * `resume` is the LLM-friendly verb that maps to Roon's `play`.
- */
-type RoonControlVerb = "play" | "pause" | "playpause" | "next" | "previous" | "stop";
+import { mapState, ZoneService } from "./ZoneService.js";
 
 /** User-friendly loop modes → Roon's native `loop` change_settings values. */
 const LOOP_TO_ROON: Record<LoopMode, "disabled" | "loop" | "loop_one"> = {
@@ -146,14 +141,7 @@ export class TransportService {
    * layer never has to serialize an `undefined` payload (issue #9).
    */
   async getNowPlaying(zoneId?: string): Promise<NowPlayingInfo> {
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError(
-        "ZONE_NOT_FOUND",
-        `Zone "${targetId}" is no longer available.`,
-      );
-    }
+    const { raw } = await this.resolveRaw(zoneId);
     return mapNowPlaying(raw);
   }
 
@@ -162,14 +150,10 @@ export class TransportService {
     if (!isTransportAction(action)) {
       throw new RoonMcpError(
         "BROWSE_FAILED",
-        `Unknown action "${action}". Use one of: pause, resume, next, previous, stop.`,
+        `Unknown action "${action}". Use one of: ${TRANSPORT_ACTIONS.join(", ")}.`,
       );
     }
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
+    const { targetId, raw } = await this.resolveRaw(zoneId);
     const verb = mapControlVerb(action);
 
     // `resume` on a zone that's already playing is a no-op, not an error: Roon
@@ -194,7 +178,6 @@ export class TransportService {
       }
     }
 
-    const transport = this.roon.getTransport();
     const sub = this.roon.getActiveSubscription();
     // Capture the pre-action fingerprint from the zone we just resolved, so
     // we can wait for Roon to push a snapshot reflecting the new state.
@@ -203,19 +186,11 @@ export class TransportService {
     const before = sub
       ? fingerprintFor({ zones: [raw] }, targetId)
       : undefined;
-    await this.logger.call(
+    await this.transportCall(
       "control",
       { zoneId: targetId, control: verb },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.control!(targetId, verb, (error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `control(${verb}) failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
+      (t, cb) => t.control!(targetId, verb, cb),
+      `control(${verb})`,
     );
 
     // Wait for the next subscription event that reflects the new state, so
@@ -223,12 +198,8 @@ export class TransportService {
     // `now_playing` right after. Times out fast on a slow Core.
     const after = sub && before
       ? await sub.waitForZoneChange(targetId, before)
-      : await this.readZonesBody(transport, sub);
-    const zoneAfter = (after.zones ?? []).find(
-      (z) =>
-        z.zone_id === targetId ||
-        (z.outputs ?? []).some((o) => o.output_id === targetId),
-    );
+      : await this.zones.getZonesBody();
+    const zoneAfter = findZone(after, targetId);
     const state = zoneAfter ? mapState(zoneAfter.state) : mapState(raw.state);
     return { ok: true, zoneId: targetId, action, state };
   }
@@ -246,13 +217,8 @@ export class TransportService {
         `level must be between 0 and 100 (got ${level}).`,
       );
     }
-    const { targetId, zone } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
+    const { targetId, raw } = await this.resolveRaw(zoneId);
 
-    const transport = this.roon.getTransport();
     const applied: string[] = [];
     const skipped: string[] = [];
 
@@ -266,22 +232,12 @@ export class TransportService {
         continue;
       }
       const value = scaleToRange(level, v);
-      await this.logger.call(
+      await this.transportCall(
         "change_volume",
         { outputId: output.output_id, how: "absolute", value },
-        () =>
-          new Promise<void>((resolve, reject) => {
-            transport.change_volume!(output, "absolute", value, (error) => {
-              if (error) {
-                reject(
-                  new RoonMcpError("BROWSE_FAILED", `change_volume failed: ${error}`),
-                );
-                return;
-              }
-              resolve();
-            });
-          }),
-        (result) => ({ value }),
+        (t, cb) => t.change_volume!(output, "absolute", value, cb),
+        "change_volume",
+        () => ({ value }),
       );
       applied.push(output.output_id);
     }
@@ -298,30 +254,16 @@ export class TransportService {
 
   /** Mute or unmute every output in the resolved zone. */
   async mute(zoneId: string | undefined, muted: boolean): Promise<MuteResult> {
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
-
-    const transport = this.roon.getTransport();
+    const { targetId, raw } = await this.resolveRaw(zoneId);
     const how = muted ? "mute" : "unmute";
     // Restrict to the named output when an output id was targeted (issue #14);
     // otherwise mute/unmute every output in the zone.
     for (const output of targetOutputs(raw, targetId)) {
-      await this.logger.call(
+      await this.transportCall(
         "mute",
         { outputId: output.output_id, how },
-        () =>
-          new Promise<void>((resolve, reject) => {
-            transport.mute!(output, how, (error) => {
-              if (error) {
-                reject(new RoonMcpError("BROWSE_FAILED", `${how} failed: ${error}`));
-                return;
-              }
-              resolve();
-            });
-          }),
+        (t, cb) => t.mute!(output, how, cb),
+        how,
       );
     }
 
@@ -345,11 +287,7 @@ export class TransportService {
         `seconds must be a finite non-negative number in absolute mode (got ${seconds}).`,
       );
     }
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
+    const { targetId, raw } = await this.resolveRaw(zoneId);
     if (raw.is_seek_allowed === false) {
       throw new RoonMcpError(
         "BROWSE_FAILED",
@@ -357,20 +295,11 @@ export class TransportService {
       );
     }
 
-    const transport = this.roon.getTransport();
-    await this.logger.call(
+    await this.transportCall(
       "seek",
       { zoneId: targetId, how: mode, seconds },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.seek!(targetId, mode, seconds, (error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `seek failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
+      (t, cb) => t.seek!(targetId, mode, seconds, cb),
+      "seek",
       () => ({ seconds }),
     );
 
@@ -383,35 +312,9 @@ export class TransportService {
    * transport doesn't expose `change_settings` (older Cores).
    */
   async setLoop(zoneId: string | undefined, mode: LoopMode): Promise<SetLoopResult> {
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
-
-    const transport = this.roon.getTransport();
-    if (typeof transport.change_settings !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Loop/repeat settings are not available on this Core (change_settings unsupported).",
-      );
-    }
+    const { targetId } = await this.resolveRaw(zoneId);
     const roonMode = LOOP_TO_ROON[mode];
-    await this.logger.call(
-      "change_settings",
-      { zoneId: targetId, settings: { loop: roonMode } },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.change_settings!(targetId, { loop: roonMode }, (error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `change_settings(loop) failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
-      () => ({ loop: roonMode }),
-    );
+    await this.changeSettings(targetId, { loop: roonMode }, "loop", "Loop/repeat settings are");
 
     return { ok: true, zoneId: targetId, mode };
   }
@@ -419,87 +322,28 @@ export class TransportService {
   /** Pause every zone on the Core. */
   async pauseAll(): Promise<PauseAllResult> {
     await this.roon.waitForCore();
-    const transport = this.roon.getTransport();
-    if (typeof transport.pause_all !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Whole-house pause is not available on this Core (pause_all unsupported).",
-      );
-    }
-    await this.logger.call(
-      "pause_all",
-      {},
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.pause_all!((error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `pause_all failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
-    );
+    this.requireTransport("pause_all", "Whole-house pause is");
+    await this.transportCall("pause_all", {}, (t, cb) => t.pause_all!(cb));
     return { ok: true, action: "pause_all" };
   }
 
   /** Mute or unmute every mutable zone on the Core. */
   async muteAll(muted: boolean): Promise<MuteAllResult> {
     await this.roon.waitForCore();
-    const transport = this.roon.getTransport();
-    if (typeof transport.mute_all !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Whole-house mute is not available on this Core (mute_all unsupported).",
-      );
-    }
+    this.requireTransport("mute_all", "Whole-house mute is");
     const how = muted ? "mute" : "unmute";
-    await this.logger.call(
-      "mute_all",
-      { how },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.mute_all!(how, (error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `mute_all failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
-    );
+    await this.transportCall("mute_all", { how }, (t, cb) => t.mute_all!(how, cb));
     return { ok: true, muted };
   }
 
   /** Turn Roon Radio (auto-radio queue continuation) on or off for a zone. */
   async setAutoRadio(zoneId: string | undefined, enabled: boolean): Promise<SetAutoRadioResult> {
-    const { targetId } = await this.zones.resolveTarget(zoneId);
-    const raw = await this.findRawZone(targetId);
-    if (!raw) {
-      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" disappeared.`);
-    }
-    const transport = this.roon.getTransport();
-    if (typeof transport.change_settings !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Roon Radio settings are not available on this Core (change_settings unsupported).",
-      );
-    }
-    await this.logger.call(
-      "change_settings",
-      { zoneId: targetId, settings: { auto_radio: enabled } },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.change_settings!(targetId, { auto_radio: enabled }, (error) => {
-            if (error) {
-              reject(
-                new RoonMcpError("BROWSE_FAILED", `change_settings(auto_radio) failed: ${error}`),
-              );
-              return;
-            }
-            resolve();
-          });
-        }),
+    const { targetId } = await this.resolveRaw(zoneId);
+    await this.changeSettings(
+      targetId,
+      { auto_radio: enabled },
+      "auto_radio",
+      "Roon Radio settings are",
     );
     return { ok: true, zoneId: targetId, autoRadio: enabled };
   }
@@ -515,13 +359,7 @@ export class TransportService {
       throw new RoonMcpError("BROWSE_FAILED", `limit must be a positive integer (got ${limit}).`);
     }
     const { targetId } = await this.zones.resolveTarget(zoneId);
-    const transport = this.roon.getTransport();
-    if (typeof transport.subscribe_queue !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Queue read-back is not available on this Core (subscribe_queue unsupported).",
-      );
-    }
+    const transport = this.requireTransport("subscribe_queue", "Queue read-back is");
 
     const items = await this.logger.call(
       "subscribe_queue",
@@ -570,13 +408,7 @@ export class TransportService {
   /** Jump playback to a queue item (id from `getQueue`) without rebuilding the queue. */
   async playFromHere(zoneId: string | undefined, queueItemId: number): Promise<PlayFromHereResult> {
     const { targetId } = await this.zones.resolveTarget(zoneId);
-    const transport = this.roon.getTransport();
-    if (typeof transport.play_from_here !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Queue jumping is not available on this Core (play_from_here unsupported).",
-      );
-    }
+    const transport = this.requireTransport("play_from_here", "Queue jumping is");
     await this.logger.call(
       "play_from_here",
       { zoneId: targetId, queueItemId },
@@ -611,26 +443,11 @@ export class TransportService {
         "Source and destination resolve to the same zone — nothing to transfer.",
       );
     }
-    const transport = this.roon.getTransport();
-    if (typeof transport.transfer_zone !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        "Zone transfer is not available on this Core (transfer_zone unsupported).",
-      );
-    }
-    await this.logger.call(
+    this.requireTransport("transfer_zone", "Zone transfer is");
+    await this.transportCall(
       "transfer_zone",
       { from: fromId, to: toId },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          transport.transfer_zone!(fromId, toId, (error) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `transfer_zone failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
+      (t, cb) => t.transfer_zone!(fromId, toId, cb),
     );
     return { ok: true, fromZoneId: fromId, toZoneId: toId };
   }
@@ -654,11 +471,7 @@ export class TransportService {
     // output's queue survives a group) and dropping duplicates.
     const outputIds: string[] = [];
     for (const entry of zonesOrOutputs) {
-      const { targetId } = await this.zones.resolveTarget(entry);
-      const raw = await this.findRawZone(targetId);
-      if (!raw) {
-        throw new RoonMcpError("ZONE_NOT_FOUND", `Zone/output "${entry}" is no longer available.`);
-      }
+      const { targetId, raw } = await this.resolveRaw(entry);
       const ids =
         raw.zone_id === targetId
           ? (raw.outputs ?? []).map((o) => o.output_id)
@@ -674,97 +487,104 @@ export class TransportService {
       );
     }
 
-    const transport = this.roon.getTransport();
-    const fn = action === "group" ? transport.group_outputs : transport.ungroup_outputs;
-    if (typeof fn !== "function") {
-      throw new RoonMcpError(
-        "BROWSE_FAILED",
-        `Output grouping is not available on this Core (${action}_outputs unsupported).`,
-      );
-    }
-    await this.logger.call(
-      `${action}_outputs`,
-      { outputIds },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          fn.call(transport, outputIds, (error: string | false) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `${action}_outputs failed: ${error}`));
-              return;
-            }
-            resolve();
-          });
-        }),
-    );
+    const method = action === "group" ? "group_outputs" : "ungroup_outputs";
+    this.requireTransport(method, "Output grouping is");
+    await this.transportCall(method, { outputIds }, (t, cb) => t[method]!(outputIds, cb));
     return { ok: true, action, outputIds };
   }
 
-  private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
-    const body = await this.getZonesBody();
-    return (body.zones ?? []).find(
-      (z) =>
-        z.zone_id === idOrOutput ||
-        (z.outputs ?? []).some((o) => o.output_id === idOrOutput),
-    );
-  }
-
-  private async getZonesBody(): Promise<GetZonesBody> {
-    await this.roon.waitForCore();
-    const transport: RoonApiTransport = this.roon.getTransport();
-    const sub = this.roon.getActiveSubscription();
-    return this.readZonesBody(transport, sub);
+  /**
+   * Resolve a zone target and re-read its raw Roon zone, so a zone that
+   * vanished between the two reads surfaces as `ZONE_NOT_FOUND` rather than
+   * an `undefined` payload (issue #9).
+   */
+  private async resolveRaw(zoneId?: string): Promise<{ targetId: string; raw: RoonApiZone }> {
+    const { targetId } = await this.zones.resolveTarget(zoneId);
+    const raw = await this.zones.findRawZone(targetId);
+    if (!raw) {
+      throw new RoonMcpError("ZONE_NOT_FOUND", `Zone "${targetId}" is no longer available.`);
+    }
+    return { targetId, raw };
   }
 
   /**
-   * Read a zone snapshot, preferring the subscription cache (kept current by
-   * Roon's `Subscribed`/`Changed` events) and falling back to a one-shot
-   * `get_zones` RPC when the cache is empty (cold start, post-reconnect).
-   * The fallback is wrapped in the service's logger so a stderr line still
-   * records the read.
+   * The transport, or `BROWSE_FAILED` when this Core lacks `method`.
+   * `feature` completes "… not available on this Core", e.g. "Zone transfer is".
    */
-  private async readZonesBody(
-    transport: RoonApiTransport,
-    sub: ZoneSubscription | undefined,
-  ): Promise<GetZonesBody> {
-    if (sub) {
-      return sub.getSnapshot(() => this.fallbackGetZones(transport));
+  private requireTransport(method: OptionalTransportMethod, feature: string): RoonApiTransport {
+    const transport = this.roon.getTransport();
+    if (typeof transport[method] !== "function") {
+      throw new RoonMcpError(
+        "BROWSE_FAILED",
+        `${feature} not available on this Core (${method} unsupported).`,
+      );
     }
-    return this.fallbackGetZones(transport);
+    return transport;
   }
 
-  private fallbackGetZones(transport: RoonApiTransport): Promise<GetZonesBody> {
+  /**
+   * Run a callback-style transport call as a logged promise. A Roon error
+   * rejects with `BROWSE_FAILED`, labelled `label` (defaults to `op`).
+   */
+  private transportCall(
+    op: string,
+    params: Record<string, unknown>,
+    invoke: (transport: RoonApiTransport, cb: (error: string | false) => void) => void,
+    label: string = op,
+    summarize?: () => Record<string, unknown>,
+  ): Promise<void> {
+    const transport = this.roon.getTransport();
     return this.logger.call(
-      "get_zones",
-      {},
+      op,
+      params,
       () =>
-        new Promise<GetZonesBody>((resolve, reject) => {
-          transport.get_zones((error, result) => {
-            if (error) {
-              reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${error}`));
-              return;
-            }
-            resolve(result);
-          });
-        }),
-      (body) => ({ zones: body.zones?.length ?? 0 }),
+      new Promise<void>((resolve, reject) => {
+        invoke(transport, (error) => {
+          if (error) {
+            reject(new RoonMcpError("BROWSE_FAILED", `${label} failed: ${error}`));
+            return;
+          }
+          resolve();
+        });
+      }),
+      summarize,
+    );
+  }
+
+  /** Apply zone settings via `change_settings` (refused on older Cores). */
+  private async changeSettings(
+    targetId: string,
+    settings: { loop?: "disabled" | "loop" | "loop_one"; auto_radio?: boolean },
+    name: string,
+    feature: string,
+  ): Promise<void> {
+    this.requireTransport("change_settings", feature);
+    await this.transportCall(
+      "change_settings",
+      { zoneId: targetId, settings },
+      (t, cb) => t.change_settings!(targetId, settings, cb),
+      `change_settings(${name})`,
+      () => settings,
     );
   }
 }
 
-function isTransportAction(s: string): s is "pause" | "resume" | "next" | "previous" | "stop" | "playpause" {
-  return (
-    s === "pause" ||
-    s === "resume" ||
-    s === "next" ||
-    s === "previous" ||
-    s === "stop" ||
-    s === "playpause"
-  );
+/** Transport methods older Cores may not expose. */
+type OptionalTransportMethod =
+  | "change_settings"
+  | "pause_all"
+  | "mute_all"
+  | "subscribe_queue"
+  | "play_from_here"
+  | "transfer_zone"
+  | "group_outputs"
+  | "ungroup_outputs";
+
+function isTransportAction(s: string): s is TransportAction {
+  return (TRANSPORT_ACTIONS as readonly string[]).includes(s);
 }
 
-function mapControlVerb(
-  action: "pause" | "resume" | "next" | "previous" | "stop" | "playpause",
-): RoonControlVerb {
+function mapControlVerb(action: TransportAction): RoonControlVerb {
   // `resume` reads naturally to a user; Roon's API uses `play` for the same
   // effect. `playpause` is a native Roon toggle verb and passes through.
   return action === "resume" ? "play" : action;
@@ -803,14 +623,7 @@ function hasNumericRange(
   return typeof v.min === "number" && typeof v.max === "number" && v.max > v.min;
 }
 
-interface NumericVolume {
-  min: number;
-  max: number;
-  step?: number;
-  type?: string;
-}
-
-function scaleToRange(percent: number, v: NumericVolume): number {
+function scaleToRange(percent: number, v: { min: number; max: number; step?: number }): number {
   const span = v.max - v.min;
   const raw = v.min + (span * percent) / 100;
   if (typeof v.step === "number" && v.step > 0) {
@@ -831,29 +644,12 @@ function targetOutputs(raw: RoonApiZone, targetId: string): RoonOutput[] {
   return outputs.filter((o) => o.output_id === targetId);
 }
 
-function mapState(state: RoonZoneState | undefined): ZoneState {
-  switch (state) {
-    case "playing":
-    case "paused":
-    case "loading":
-    case "stopped":
-      return state;
-    default:
-      return "unknown";
-  }
-}
-
 /** Map a queue item to the public entry shape (same line-picking as now-playing). */
 function mapQueueItem(item: RoonQueueItem, index: number): QueueEntry {
-  const three = item.three_line;
-  const two = item.two_line;
-  const one = item.one_line;
   return {
     position: index + 1,
     queueItemId: item.queue_item_id,
-    title: three?.line1 ?? two?.line1 ?? one?.line1,
-    artist: three?.line2 ?? two?.line2,
-    album: three?.line3,
+    ...trackLines(item),
     lengthSec: item.length,
     imageKey: item.image_key,
   };
@@ -862,18 +658,11 @@ function mapQueueItem(item: RoonQueueItem, index: number): QueueEntry {
 /** Map a Roon zone (with `now_playing`) to the public `NowPlayingInfo` shape. */
 function mapNowPlaying(raw: RoonApiZone): NowPlayingInfo {
   const np = raw.now_playing;
-  // Prefer three-line (artist + album), fall back to two-line (artist only),
-  // then one-line. Mirrors how ZoneService.nowPlayingFor picks a label.
-  const three = np?.three_line;
-  const two = np?.two_line;
-  const one = np?.one_line;
   return {
     zoneId: raw.zone_id,
     displayName: raw.display_name,
     state: mapState(raw.state),
-    title: three?.line1 ?? two?.line1 ?? one?.line1,
-    artist: three?.line2 ?? two?.line2,
-    album: three?.line3,
+    ...trackLines(np),
     imageKey: np?.image_key,
     lengthSec: np?.length,
     seekPositionSec: np?.seek_position,
@@ -890,13 +679,7 @@ function mapNowPlaying(raw: RoonApiZone): NowPlayingInfo {
 function zoneVolumePercent(raw: RoonApiZone): number | undefined {
   for (const o of raw.outputs ?? []) {
     const v = o.volume;
-    if (
-      v &&
-      typeof v.min === "number" &&
-      typeof v.max === "number" &&
-      typeof v.value === "number" &&
-      v.max > v.min
-    ) {
+    if (v && hasNumericRange(v) && typeof v.value === "number") {
       return Math.round(((v.value - v.min) / (v.max - v.min)) * 100);
     }
   }

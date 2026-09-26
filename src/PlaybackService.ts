@@ -1,18 +1,13 @@
 import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 
-import type { GetZonesBody } from "node-roon-api-transport";
-
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { hierarchyForLocator } from "./locator.js";
-import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
-import {
-  fingerprintFor,
-  ZoneSubscription,
-} from "./ZoneSubscription.js";
+import { SearchNavigator, isSelectable, normalize, requireLocator } from "./SearchNavigator.js";
+import { findZone, fingerprintFor, ZoneSubscription } from "./ZoneSubscription.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
-import { ZoneService } from "./ZoneService.js";
+import { nowPlayingLine, ZoneService } from "./ZoneService.js";
 import {
   RoonMcpError,
   type EnqueueAndPlayInput,
@@ -48,10 +43,6 @@ const SHUFFLE_LABELS = ["shuffle"];
 // For curated, ordered queues we append to the end ("Add to Queue"/"Queue")
 // rather than "Add Next", which would reverse the order on repeated calls.
 const QUEUE_LABELS = ["add to queue", "queue", "add next"];
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
 
 /** An action candidate has a key and is not a header/list/action-list node. */
 function isActionItem(item: BrowseItem): boolean {
@@ -137,7 +128,7 @@ export class PlaybackService {
       : shuffle
         ? [...SHUFFLE_LABELS, ...PLAY_LABELS]
         : PLAY_LABELS;
-    const { action } = await this.findAction(hierarchy, labels);
+    const action = await this.findAction(hierarchy, labels);
     if (!action) {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
@@ -325,7 +316,7 @@ export class PlaybackService {
         return { ok: false, reason: opened.message ?? "Item is not playable." };
       }
 
-      const { action } = await this.findAction(hierarchy, labels);
+      const action = await this.findAction(hierarchy, labels);
       if (!action) return { ok: false, reason: "No matching play/queue action." };
 
       const result = await this.browse.browse({
@@ -363,15 +354,11 @@ export class PlaybackService {
    * album itself, with "Play Album" living one level deeper). It only fires
    * when every selectable item at the level is a `list`, so levels that mix
    * real actions with sub-lists are never mis-drilled.
-   *
-   * Reports how many extra levels it pushed so callers can pop back.
    */
   private async findAction(
     hierarchy: BrowseHierarchy,
     labels: string[],
-  ): Promise<{ action: BrowseItem | null; extraLevelsPushed: number }> {
-    let extraLevelsPushed = 0;
-
+  ): Promise<BrowseItem | null> {
     for (let depth = 0; depth <= MAX_ACTION_DRILL_DEPTH; depth++) {
       const loaded = await this.browse.load({
         hierarchy,
@@ -380,7 +367,7 @@ export class PlaybackService {
       });
 
       const direct = pickAction(loaded.items, labels);
-      if (direct) return { action: direct, extraLevelsPushed };
+      if (direct) return direct;
 
       if (depth === MAX_ACTION_DRILL_DEPTH) break;
 
@@ -391,9 +378,7 @@ export class PlaybackService {
         // Pass-through level: nothing actionable, only sub-lists (e.g. the
         // album-versions page). Drill the first one — Roon lists the primary
         // version first — and look again a level deeper.
-        const selectable = loaded.items.filter(
-          (i) => Boolean(i.item_key) && i.hint !== "header",
-        );
+        const selectable = loaded.items.filter(isSelectable);
         const allLists =
           selectable.length > 0 && selectable.every((i) => i.hint === "list");
         if (allLists) container = selectable[0];
@@ -412,10 +397,9 @@ export class PlaybackService {
         break;
       }
       if (drilled.action !== "list") break;
-      extraLevelsPushed++;
     }
 
-    return { action: null, extraLevelsPushed };
+    return null;
   }
 
   /** Best-effort shuffle via Transport; returns false if unsupported/failed. */
@@ -443,9 +427,8 @@ export class PlaybackService {
 
   /**
    * Snapshot a zone's `(state, title, artist, album)` fingerprint before a
-   * playback action runs, so we can wait for the post-action change. Reads
-   * via the active subscription (or `get_zones` cold-start fallback). Returns
-   * `undefined` when no subscription is active and the zone isn't yet known
+   * playback action runs, so we can wait for the post-action change. Returns
+   * `undefined` when no subscription is active or the zone isn't yet known
    * — the caller falls back to the legacy immediate read.
    */
   private async captureFingerprint(
@@ -453,22 +436,7 @@ export class PlaybackService {
     zoneId: string,
   ): Promise<ReturnType<typeof fingerprintFor>> {
     if (!sub) return undefined;
-    const body = await sub.getSnapshot(() => this.coldStartGetZones());
-    return fingerprintFor(body, zoneId);
-  }
-
-  /** One-shot `get_zones` RPC for the cold-start case (no subscription yet). */
-  private coldStartGetZones(): Promise<GetZonesBody> {
-    const transport = this.roon.getTransport();
-    return new Promise<GetZonesBody>((resolve, reject) => {
-      transport.get_zones((err, result) => {
-        if (err) {
-          reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${err}`));
-          return;
-        }
-        resolve(result);
-      });
-    });
+    return fingerprintFor(await this.zones.getZonesBody(), zoneId);
   }
 
   /**
@@ -486,13 +454,7 @@ export class PlaybackService {
         return await this.zones.nowPlayingFor(zoneId);
       }
       const after = await sub.waitForZoneChange(zoneId, before);
-      const z = (after.zones ?? []).find(
-        (x) =>
-          x.zone_id === zoneId ||
-          (x.outputs ?? []).some((o) => o.output_id === zoneId),
-      );
-      const np = z?.now_playing;
-      return np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1;
+      return nowPlayingLine(findZone(after, zoneId));
     } catch {
       return undefined;
     }

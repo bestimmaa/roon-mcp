@@ -1,12 +1,11 @@
 import type { BrowseItem } from "node-roon-api-browse";
 
-import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { BrowseSessionManager, isStaleSession } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { encodeLocator } from "./locator.js";
-import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
+import { SEARCH_HIERARCHY, isSelectable, normalize } from "./SearchNavigator.js";
 import { perAlbumBudget, TrackExpansionService } from "./TrackExpansionService.js";
 import {
-  RoonMcpError,
   type MusicCandidate,
   type MusicItemType,
   type SearchMusicInput,
@@ -30,10 +29,6 @@ const GROUP_TITLE_TO_TYPE: Record<string, MusicItemType> = {
   stations: "radio",
   "internet radio": "radio",
 };
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
 
 /** Strip a trailing count, e.g. "Albums (12)" → "albums". */
 function groupTitleToType(title: string): MusicItemType {
@@ -238,20 +233,24 @@ export class SearchService {
     }
 
     let broadened = false;
+    const scanned = new Set<number>();
     let candidates = await this.collectFromGroups(
       input.query,
       groups,
       this.selectGroupIndices(groups, input.type),
       limit,
+      scanned,
     );
 
-    // If a typed search came back empty, broaden to all categories.
+    // If a typed search came back empty, broaden to all categories. Groups the
+    // typed pass fully scanned yielded nothing, so skip them; a group that
+    // failed with a stale session is retried.
     if (candidates.length === 0 && input.type) {
       broadened = true;
       candidates = await this.collectFromGroups(
         input.query,
         groups,
-        groups.map((_, idx) => idx),
+        groups.map((_, idx) => idx).filter((idx) => !scanned.has(idx)),
         limit,
       );
     }
@@ -290,6 +289,8 @@ export class SearchService {
     groups: BrowseItem[],
     indices: number[],
     limit: number,
+    /** Receives each group index that was scanned without error. */
+    scanned?: Set<number>,
   ): Promise<MusicCandidate[]> {
     const out: MusicCandidate[] = [];
     for (const g of indices) {
@@ -299,7 +300,10 @@ export class SearchService {
         const nav = await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: group.item_key });
         // action:"none" means Roon didn't push a new level (e.g. a "No Results"
         // placeholder item) — nothing to load and nothing to pop.
-        if (nav.action !== "list") continue;
+        if (nav.action !== "list") {
+          scanned?.add(g);
+          continue;
+        }
         const loaded = await this.browse.load({
           hierarchy: SEARCH_HIERARCHY,
           offset: 0,
@@ -325,9 +329,10 @@ export class SearchService {
         // item_keys are level-scoped: pop back to the group list before the
         // next group so its keys stay valid.
         await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, pop_levels: 1 });
+        scanned?.add(g);
       } catch (err) {
         // A single bad group shouldn't sink the whole search.
-        if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") continue;
+        if (isStaleSession(err)) continue;
         throw err;
       }
     }
