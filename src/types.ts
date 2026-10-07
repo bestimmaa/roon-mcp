@@ -91,6 +91,13 @@ export interface EnqueueAndPlayInput {
   shuffle?: boolean;
 }
 
+export interface EnqueueAppendInput {
+  /** Zone id or output id (from `list_zones`); see `PlayNowInput.zoneId`. */
+  zoneId?: string;
+  /** Ordered, session-scoped item keys (e.g. from `get_tracks_for`). */
+  itemKeys: string[];
+}
+
 export interface PlaybackResult {
   ok: boolean;
   zoneId: string;
