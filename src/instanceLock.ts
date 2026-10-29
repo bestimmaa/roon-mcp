@@ -18,8 +18,13 @@ export interface LockAcquired {
 
 export interface LockHeldByOther {
   acquired: false;
-  ownerPid: number;
-  ownerStartedAt: string;
+  /**
+   * Who holds the lock. Both fields are absent in one pathological case:
+   * every takeover attempt lost its race and no stable owner could be read
+   * back — the lock is churning between contending instances.
+   */
+  ownerPid?: number;
+  ownerStartedAt?: string;
 }
 
 interface LockFileContents {
@@ -118,17 +123,21 @@ export function acquireInstanceLock(
           ? `found a stale instance lock from pid ${read.contents.pid} at ${path}; taking over`
           : `found an unreadable instance lock at ${path}; taking over`,
       );
+      // The tombstone name needs no uniqueness — the atomicity lives in the
+      // rename of `path` itself, and a fixed name means a tombstone orphaned
+      // by a crash is overwritten by the next takeover instead of lingering.
       try {
-        renameSync(path, `${path}.stale-${process.pid}`);
+        renameSync(path, `${path}.stale`);
       } catch {
         // Lost the removal race — another process is mid-takeover. Re-read
         // and re-evaluate the new owner.
         continue;
       }
       try {
-        unlinkSync(`${path}.stale-${process.pid}`);
+        unlinkSync(`${path}.stale`);
       } catch {
-        // A lingering tombstone is harmless.
+        // Another takeover may have unlinked it first; a lingering tombstone
+        // is harmless either way.
       }
     }
 
@@ -150,11 +159,13 @@ export function acquireInstanceLock(
   }
 
   // Lost every takeover race: each retry means another process got there
-  // first, so by now the file names a (very recent, presumed live) winner.
+  // first, so by now the file usually names a (very recent, presumed live)
+  // winner; when even that read finds no stable owner, report the churn as
+  // ownerless rather than inventing a pid.
   const owner = readLock(path);
   return owner.state === "owned"
     ? { acquired: false, ownerPid: owner.contents.pid, ownerStartedAt: owner.contents.startedAt }
-    : { acquired: false, ownerPid: -1, ownerStartedAt: "unknown" };
+    : { acquired: false };
 }
 
 function makeHandle(path: string): InstanceLockHandle {
