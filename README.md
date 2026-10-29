@@ -66,6 +66,8 @@ npm install -g roon-mcp
 | Env var | Purpose |
 | --- | --- |
 | `ROON_DEFAULT_ZONE` | Optional fallback target for `play_now` / `enqueue_and_play` when no `zoneId` is given — a zone/output id or a display-name substring. If unset, the server falls back to the only zone, an `Office` zone, or the currently-playing zone; if it still can't decide it returns `ZONE_AMBIGUOUS` so the agent can ask. |
+| `ROON_HOST` | Optional direct-connection host for the Core's API, bypassing SOOD multicast discovery — for VLAN-segmented networks, VPNs, or containers where discovery doesn't survive. Unset (default) uses discovery as before. |
+| `ROON_PORT` | WebSocket port of the Core's API when `ROON_HOST` is set. Defaults to `9330`. |
 | `ROON_MCP_CONFIG` | Optional path for the persisted pairing token. A value ending in `.json` is the file itself; anything else is a directory to hold `config.json`. Defaults to `$XDG_CONFIG_HOME/roon-mcp/config.json` (i.e. `~/.config/roon-mcp/config.json`). |
 
 ## Tools
@@ -78,16 +80,52 @@ npm install -g roon-mcp
 | `play_now({ zoneId?, itemKey, shuffle?, addToQueue? })` | Play or queue one search candidate. By default replaces the queue and starts immediately. Pass `addToQueue: true` to append to the existing queue instead. `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
 | `now_playing({ zoneId? })` | Snapshot of the zone's current track — state, title, artist, album, seek position. `title`/`artist`/`album` are undefined when nothing is playing. |
-| `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop`. |
+| `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop` / `playpause` (toggle play/pause). |
+| `seek({ zoneId?, seconds, mode? })` | Seek within the current track. `mode:"absolute"` (default) seeks to `seconds` (0 = start); `"relative"` moves by `seconds` (negative skips backward). |
+| `set_loop({ zoneId?, mode })` | Set the loop/repeat mode: `off` / `all` / `one`. |
 | `set_volume({ zoneId?, level })` | Set the zone's volume to `level` percent (0–100). Rescales to each output's native range; incremental outputs are reported as skipped. |
 | `mute({ zoneId?, muted })` | Mute (`muted: true`) or unmute (`muted: false`) every output in the zone. |
+| `pause_all()` | Pause every zone on the Core in one call. Resume per zone with `control_playback`. |
+| `mute_all({ muted })` | Mute (`muted: true`) or unmute (`muted: false`) every mutable output on the Core. |
+| `set_auto_radio({ zoneId?, enabled })` | Turn Roon Radio on/off for a zone: `enabled: true` appends similar tracks once the queue ends, `false` stops playback at queue end. |
+| `library_export({ path, limit? })` | Walk Library → Albums and write the album catalog to `path` as JSON (written atomically; parents created; an existing file is only replaced if it is an earlier snapshot). The albums go to the **file** — the result carries only counts and timings. Can take tens of seconds on a large library, and holds the browse session for the whole walk (search/play calls wait behind it). |
 
-### Notes
+### Streaming search (genre and artist)
 
 - **Genre search** fuzzy-matches what you type — "psychedelic trance" will find the right genre even if the name isn't exact. By default results come from your library.
 - **`includeStreaming: true`** (on `type:"genre"` or `type:"artist"`) extends the search to your streaming service, so you can play artists or genres that aren't in your local collection.
+
+### Notes
+
 - **After starting playback**, `now_playing` reflects the track that just started, not whatever was playing before.
 - **Volume** is set as a percentage (0–100) and works correctly across grouped zones.
+
+### Concurrent instances
+
+Roon pairs only one running instance of an extension at a time. Since every `roon-mcp`
+process shares the same identity and persisted pairing token, starting a second instance
+(a second MCP client session, or an orphaned process from a closed terminal) no longer
+fights the first one for the pairing slot — instead, whichever instance starts first
+claims a lock file (`instance.lock`, next to `config.json`) and every other instance
+fails fast with a `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
+flapping between paired/unpaired.
+
+A lock whose owning process is no longer alive is treated as stale and taken over —
+both at startup and by an already-running blocked instance, which re-checks the lock
+on every call. So when the holder exits (cleanly or via `kill -9`), the next call to
+any other instance acquires the lock, starts discovery, and pairs; nothing needs
+restarting.
+
+MCP clients don't always reap server processes when a session ends, so orphaned
+`roon-mcp` instances can pile up and hold the lock long after their terminal is gone. If
+you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
+
+```bash
+pkill -f roon-mcp
+```
+
+Blocked instances that are still running recover on their own next call, and the next
+instance you start acquires the lock normally.
 
 ## Assumptions
 
@@ -108,8 +146,9 @@ durable playlists are out of scope. Curated playback is delivered by `enqueue_an
 
 ## Logging
 
-Every Roon API call (`browse`, `load`, `get_zones`, `change_settings`) emits one
-structured line to **stderr** (stdout stays reserved for MCP JSON-RPC):
+Every Roon API call (`browse`, `load`, `get_zones`, `control`, `change_volume`, `mute`,
+`seek`, `change_settings`, `pause_all`, `mute_all`, …) emits one structured line to
+**stderr** (stdout stays reserved for MCP JSON-RPC):
 
 ```
 [roon-call] {"t":"2026-06-19T18:00:00.000Z","lvl":"info","op":"browse","ms":12,"params":{"hierarchy":"search","item_key":"…"},"result":{"action":"list","count":7}}

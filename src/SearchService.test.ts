@@ -21,6 +21,8 @@ interface GroupDef {
   key: string;
   items: BrowseItem[];
   failDrill?: boolean;
+  /** Fail only the first N drills into this group with InvalidItemKey. */
+  failDrillTimes?: number;
 }
 
 interface FakeOpts {
@@ -32,6 +34,8 @@ interface FakeOpts {
 class FakeBrowse {
   private stack: BrowseItem[][] = [];
   private inputCalls = 0;
+  /** item_key → number of drill attempts, for asserting re-scans. */
+  readonly drillCounts = new Map<string, number>();
 
   constructor(
     private readonly groups: GroupDef[],
@@ -66,8 +70,10 @@ class FakeBrowse {
       return cb(false, { action: "list" });
     }
     if (o.item_key !== undefined) {
+      const attempt = (this.drillCounts.get(o.item_key) ?? 0) + 1;
+      this.drillCounts.set(o.item_key, attempt);
       const g = this.groups.find((x) => x.key === o.item_key);
-      if (g && !g.failDrill) {
+      if (g && !g.failDrill && attempt > (g.failDrillTimes ?? 0)) {
         this.stack.push(g.items);
         return cb(false, { action: "list" });
       }
@@ -94,10 +100,19 @@ function buildService(
   opts?: FakeOpts,
   drills?: Record<string, BrowseItem[]>,
 ): SearchService {
+  return buildServiceWithFake(groups, opts, drills).svc;
+}
+
+function buildServiceWithFake(
+  groups: GroupDef[],
+  opts?: FakeOpts,
+  drills?: Record<string, BrowseItem[]>,
+): { svc: SearchService; fake: FakeBrowse } {
   const fake = new FakeBrowse(groups, opts, drills);
   const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
   const browse = new BrowseSessionManager(stub);
-  return new SearchService(browse, new GenreService(browse), new TrackExpansionService(browse));
+  const svc = new SearchService(browse, new GenreService(browse), new TrackExpansionService(browse));
+  return { svc, fake };
 }
 
 function item(title: string, key: string): BrowseItem {
@@ -158,6 +173,24 @@ test("a typed search with no matching items broadens to all categories", async (
   assert.equal(out.broadened, true);
   assert.match(out.message ?? "", /broadened/i);
   assert.equal(out.candidates[0]?.title, "Dark Ambient");
+});
+
+test("broadening skips a typed group that was fully scanned and came back empty", async () => {
+  const EMPTY_TRACKS: GroupDef = { title: "Tracks", key: "g:tracks", items: [] };
+  const { svc, fake } = buildServiceWithFake([ARTISTS, EMPTY_TRACKS]);
+  const out = await svc.searchMusic({ query: "Tycho", type: "track" });
+  assert.equal(out.broadened, true);
+  assert.equal(out.candidates[0]?.title, "Tycho");
+  assert.equal(fake.drillCounts.get("g:tracks"), 1);
+});
+
+test("broadening retries a typed group that failed with a stale session", async () => {
+  const flakyArtists: GroupDef = { ...ARTISTS, failDrillTimes: 1 };
+  const { svc, fake } = buildServiceWithFake([flakyArtists, ALBUMS]);
+  const out = await svc.searchMusic({ query: "Tycho", type: "artist" });
+  assert.equal(out.broadened, true);
+  assert.ok(out.candidates.some((c) => c.title === "Tycho" && c.type === "artist"));
+  assert.equal(fake.drillCounts.get("g:artists"), 2);
 });
 
 test("type:genre is resolved via the genres tree, not broadened to artists", async () => {
@@ -301,6 +334,21 @@ test("streaming-genre results are budgeted against limit so the total never exce
   const svc = buildService([albums], undefined, drills);
   const out = await svc.searchMusic({ query: "Album", type: "genre", includeStreaming: true, limit: 4 });
   assert.ok(out.candidates.length <= 4, `expected ≤4 total candidates, got ${out.candidates.length}`);
+});
+
+test("library candidate sourceGroup strips the result count (issue #12)", async () => {
+  // Roon titles search groups with a trailing count, e.g. "Artists (12)".
+  // sourceGroup should carry the clean label ("Artists"), matching the
+  // "Streaming"/"Genres" labels rather than the raw "(12)"-suffixed title.
+  const artists: GroupDef = {
+    title: "Artists (12)",
+    key: "g:artists",
+    items: [item("Tycho", "a:tycho")],
+  };
+  const svc = buildService([artists]);
+  const out = await svc.searchMusic({ query: "Tycho" });
+  assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  assert.equal(out.candidates[0]?.type, "artist");
 });
 
 test("limit caps the number of returned candidates", async () => {

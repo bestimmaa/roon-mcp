@@ -2,6 +2,7 @@ import type { BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { encodeGenreLocator } from "./locator.js";
+import { GENRES_HIERARCHY, normalize } from "./SearchNavigator.js";
 import type { MusicCandidate } from "./types.js";
 
 // Roon's flat `search` hierarchy doesn't expose genres; they live in a dedicated
@@ -16,6 +17,10 @@ import type { MusicCandidate } from "./types.js";
 const MAX_DEPTH = 3;
 // Load generously; genre lists run to a few dozen entries (Electronic had 38).
 const SCAN_COUNT = 200;
+// How long the cached genre index stays fresh before a rebuild picks up
+// library genre edits. Long enough to amortize the tree walk across a typical
+// search session, short enough not to serve a stale tree indefinitely (#18).
+export const INDEX_TTL_MS = 60 * 60 * 1000;
 
 // English container labels that sit inside a genre page alongside its
 // sub-genres. They are NOT genres themselves, so the walk skips them. Same
@@ -27,10 +32,6 @@ interface GenreEntry {
   /** Genre node titles from the root, e.g. ["Electronic", "Trance", "Psytrance"]. */
   path: string[];
   title: string;
-}
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
 }
 
 /** Lowercased alphanumerics only — collapses "Psy-Trance"/"Psy Trance" alike. */
@@ -126,6 +127,14 @@ export function scoreGenre(query: string, title: string): number {
 /** Resolves genre queries by walking and caching the `genres` hierarchy tree. */
 export class GenreService {
   private index?: Promise<GenreEntry[]>;
+  /**
+   * Wall-clock time (ms since epoch) the current index was started. Used to
+   * expire the cache so genre edits in Roon (added/removed/renamed genres)
+   * are picked up instead of serving a stale tree for the whole session
+   * (issue #18). Set optimistically when a build begins so concurrent callers
+   * reuse the in-flight build rather than racing a second one.
+   */
+  private indexedAt = 0;
 
   constructor(private readonly browse: BrowseSessionManager) {}
 
@@ -148,15 +157,35 @@ export class GenreService {
       }));
   }
 
-  /** Build the index once per session; rebuild only if the build failed. */
+  /**
+   * Build the index once and reuse it until {@link INDEX_TTL_MS} elapses, then
+   * rebuild on the next call so library genre changes surface. A failed build
+   * clears the cache so the next call retries. The clock is indirected via
+   * {@link now} so tests can drive TTL expiry deterministically.
+   */
   private getIndex(): Promise<GenreEntry[]> {
-    if (!this.index) {
-      this.index = this.buildIndex().catch((err) => {
-        this.index = undefined; // let a later call retry a failed walk
-        throw err;
-      });
+    const now = this.now();
+    const fresh = this.index !== undefined && now - this.indexedAt <= INDEX_TTL_MS;
+    if (!fresh) {
+      // Mark in-flight so concurrent callers reuse this build, not start another.
+      this.indexedAt = now;
+      this.index = this.buildIndex()
+        .then((entries) => {
+          this.indexedAt = this.now(); // refresh to completion time
+          return entries;
+        })
+        .catch((err) => {
+          this.index = undefined; // let a later call retry a failed walk
+          this.indexedAt = 0;
+          throw err;
+        });
     }
-    return this.index;
+    return this.index!;
+  }
+
+  /** Wall clock, in ms. Indirected so tests can drive expiry deterministically. */
+  protected now(): number {
+    return Date.now();
   }
 
   private buildIndex(): Promise<GenreEntry[]> {
@@ -165,7 +194,7 @@ export class GenreService {
     // and popping a sibling (same pattern as SearchService.collectFromGroups).
     return this.browse.runExclusive(async () => {
       const entries: GenreEntry[] = [];
-      await this.browse.browse({ hierarchy: "genres", pop_all: true });
+      await this.browse.browse({ hierarchy: GENRES_HIERARCHY, pop_all: true });
       await this.walk([], entries, 0);
       return entries;
     });
@@ -177,7 +206,7 @@ export class GenreService {
    * parent's keys stay valid for the next sibling.
    */
   private async walk(path: string[], entries: GenreEntry[], depth: number): Promise<void> {
-    const loaded = await this.browse.load({ hierarchy: "genres", offset: 0, count: SCAN_COUNT });
+    const loaded = await this.browse.load({ hierarchy: GENRES_HIERARCHY, offset: 0, count: SCAN_COUNT });
     const nodes = loaded.items.filter(isGenreNode);
 
     for (const node of nodes) {
@@ -185,11 +214,11 @@ export class GenreService {
       entries.push({ path: childPath, title: node.title });
       if (depth + 1 >= MAX_DEPTH) continue;
 
-      const into = await this.browse.browse({ hierarchy: "genres", item_key: node.item_key! });
+      const into = await this.browse.browse({ hierarchy: GENRES_HIERARCHY, item_key: node.item_key! });
       if (into.action !== "list") continue;
       await this.walk(childPath, entries, depth + 1);
       // Level-scoped keys: pop back to this level before the next sibling.
-      await this.browse.browse({ hierarchy: "genres", pop_levels: 1 });
+      await this.browse.browse({ hierarchy: GENRES_HIERARCHY, pop_levels: 1 });
     }
   }
 }

@@ -276,6 +276,67 @@ test("actions nested under an action_list container are found", async () => {
   assert.equal(browse.invocations[0]?.itemKey, "act:play");
 });
 
+test("an album behind a versions page (lone list item) is drilled to Play Album", async () => {
+  // Mirrors the real search shape for an album: opening the candidate lands on
+  // a pass-through page whose only item is the album version (hint "list");
+  // the track list with its "Play Album" action_list container is one level
+  // deeper, and the concrete actions a level below that.
+  const { svc, browse } = build(
+    { album: [{ title: "Kind Of Blue", item_key: "ver:0", hint: "list" }] },
+    ["act:play"],
+    {
+      drills: {
+        "ver:0": [
+          { title: "Play Album", item_key: "al:play", hint: "action_list" },
+          { title: "1. So What", item_key: "trk:0", hint: "action_list" },
+        ],
+        "al:play": [action("Play Now", "act:play"), action("Queue", "act:queue")],
+      },
+    },
+  );
+
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
+
+  assert.equal(out.ok, true);
+  assert.deepEqual(browse.invocations, [{ itemKey: "act:play", zone: "z1" }]);
+});
+
+test("a versions page is drilled for queueing too (Add to Queue found deep)", async () => {
+  const { svc, browse } = build(
+    { album: [{ title: "Kind Of Blue", item_key: "ver:0", hint: "list" }] },
+    ["act:queue"],
+    {
+      drills: {
+        "ver:0": [{ title: "Play Album", item_key: "al:play", hint: "action_list" }],
+        "al:play": [action("Play Now", "act:x"), action("Add to Queue", "act:queue")],
+      },
+    },
+  );
+
+  const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album"), addToQueue: true });
+
+  assert.equal(out.ok, true);
+  assert.deepEqual(browse.invocations, [{ itemKey: "act:queue", zone: "z1" }]);
+});
+
+test("a level mixing lists with non-list items is not speculatively drilled", async () => {
+  // Only pure pass-through levels (every selectable item a `list`) may be
+  // drilled without an action_list; mixed levels yield NO_PLAY_ACTION.
+  const { svc } = build(
+    {
+      album: [
+        { title: "Tracks", item_key: "x", hint: "list" },
+        { title: "Some input", item_key: "y", hint: undefined, input_prompt: { prompt: "p", action: "a", is_password: false } },
+      ],
+    },
+    [],
+  );
+  await assert.rejects(
+    svc.playNow({ zoneId: "z1", itemKey: loc("album") }),
+    (e) => e instanceof RoonMcpError && e.code === "NO_PLAY_ACTION",
+  );
+});
+
 test("a failed action invocation reopens the item and retries once", async () => {
   const { svc, browse } = build({ album: [action("Play Now", "act:play")] }, ["act:play"], {
     playOpts: { failActionTimes: 1 },
@@ -392,6 +453,29 @@ test("enqueue leaves the zone's shuffle setting untouched when shuffle is omitte
 
   await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")] });
   assert.deepEqual(transport.shuffleCalls, []);
+});
+
+test("enqueue with shuffle:false stays silent when change_settings is unavailable (issue #11)", async () => {
+  // A queue built in order is already unshuffled; an unavailable change_settings
+  // (old transport) must not append a noisy "could not be applied" warning.
+  const transport = new FakeTransport([ZONE], false);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")], shuffle: false });
+  assert.equal(out.ok, true);
+  assert.deepEqual(transport.shuffleCalls, []);
+  assert.doesNotMatch(out.message ?? "", /could not be applied/i);
+});
+
+test("enqueue with shuffle:true still warns when change_settings is unavailable", async () => {
+  // The silent path is only for shuffle:false — actively requested shuffle
+  // that can't be applied must still be reported.
+  const transport = new FakeTransport([ZONE], false);
+  const { svc } = build({ t1: [action("Play Now", "p1")] }, ["p1"], { transport });
+
+  const out = await svc.enqueueAndPlay({ zoneId: "z1", itemKeys: [loc("t1")], shuffle: true });
+  assert.equal(out.ok, true);
+  assert.match(out.message ?? "", /could not be applied/i);
 });
 
 test("enqueue rejects an unknown zone id with ZONE_NOT_FOUND", async () => {

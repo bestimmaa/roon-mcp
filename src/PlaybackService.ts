@@ -1,18 +1,13 @@
 import type { BrowseHierarchy, BrowseItem } from "node-roon-api-browse";
 
-import type { GetZonesBody } from "node-roon-api-transport";
-
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
 import { hierarchyForLocator } from "./locator.js";
-import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
-import {
-  fingerprintFor,
-  ZoneSubscription,
-} from "./ZoneSubscription.js";
+import { SearchNavigator, isSelectable, normalize, requireLocator } from "./SearchNavigator.js";
+import { findZone, fingerprintFor, ZoneSubscription } from "./ZoneSubscription.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
-import { ZoneService } from "./ZoneService.js";
+import { nowPlayingLine, ZoneService } from "./ZoneService.js";
 import {
   RoonMcpError,
   type EnqueueAndPlayInput,
@@ -25,6 +20,11 @@ import {
 // hierarchy that produced them (flat "search" for most items, "genres" for a
 // genre), re-navigating to a live key via SearchNavigator.
 const LOAD_COUNT = 100;
+
+// How many container levels findAction may drill through before giving up.
+// Covers the deepest known real shape: album-versions page (list) → track
+// list ("Play Album" action_list) → the action menu itself.
+const MAX_ACTION_DRILL_DEPTH = 3;
 
 // English Roon action labels, ordered by preference (highest first). The plan
 // flags localization as an open item; non-English Cores need locale-aware
@@ -43,10 +43,6 @@ const SHUFFLE_LABELS = ["shuffle"];
 // For curated, ordered queues we append to the end ("Add to Queue"/"Queue")
 // rather than "Add Next", which would reverse the order on repeated calls.
 const QUEUE_LABELS = ["add to queue", "queue", "add next"];
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
 
 /** An action candidate has a key and is not a header/list/action-list node. */
 function isActionItem(item: BrowseItem): boolean {
@@ -132,7 +128,7 @@ export class PlaybackService {
       : shuffle
         ? [...SHUFFLE_LABELS, ...PLAY_LABELS]
         : PLAY_LABELS;
-    const { action } = await this.findAction(hierarchy, labels);
+    const action = await this.findAction(hierarchy, labels);
     if (!action) {
       throw new RoonMcpError(
         "NO_PLAY_ACTION",
@@ -273,12 +269,15 @@ export class PlaybackService {
       }
 
       // 3. Apply shuffle only when explicitly requested (leave the zone's
-      //    setting untouched otherwise). Best-effort via Transport.
+      //    setting untouched otherwise). Best-effort via Transport. Only warn
+      //    when shuffle-on was requested and couldn't be applied; shuffle-off
+      //    failing is silent — a queue built in order is already unshuffled,
+      //    and an unavailable change_settings is the common cause (issue #11).
       let shuffleNote: string | undefined;
       if (input.shuffle !== undefined) {
         const applied = await this.trySetShuffle(targetId, input.shuffle);
-        if (!applied) {
-          shuffleNote = ` Shuffle ${input.shuffle ? "on" : "off"} could not be applied (Transport setting unavailable).`;
+        if (!applied && input.shuffle) {
+          shuffleNote = " Shuffle was requested but could not be applied (Transport setting unavailable).";
         }
       }
 
@@ -317,7 +316,7 @@ export class PlaybackService {
         return { ok: false, reason: opened.message ?? "Item is not playable." };
       }
 
-      const { action } = await this.findAction(hierarchy, labels);
+      const action = await this.findAction(hierarchy, labels);
       if (!action) return { ok: false, reason: "No matching play/queue action." };
 
       const result = await this.browse.browse({
@@ -345,34 +344,62 @@ export class PlaybackService {
 
   /**
    * Find an action (by label preference) for the currently-opened item.
-   * Inspects the loaded list directly, and drills one level into an
-   * `action_list` container if the actions aren't exposed at the top level.
-   * Reports how many extra levels it pushed so callers can pop back.
+   * Inspects the loaded list directly, and drills into containers when the
+   * actions aren't exposed at the top level, preferring an `action_list`
+   * container (e.g. "Play Album" / "More") over a plain `list` child.
+   *
+   * The plain-`list` fallback handles pass-through levels that hold no
+   * actions at all — most notably the album-versions page the search
+   * hierarchy returns when opening an album (a lone `list` item for the
+   * album itself, with "Play Album" living one level deeper). It only fires
+   * when every selectable item at the level is a `list`, so levels that mix
+   * real actions with sub-lists are never mis-drilled.
    */
   private async findAction(
     hierarchy: BrowseHierarchy,
     labels: string[],
-  ): Promise<{ action: BrowseItem | null; extraLevelsPushed: number }> {
-    const loaded = await this.browse.load({
-      hierarchy,
-      offset: 0,
-      count: LOAD_COUNT,
-    });
-
-    const direct = pickAction(loaded.items, labels);
-    if (direct) return { action: direct, extraLevelsPushed: 0 };
-
-    const container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
-    if (container) {
-      await this.browse.browse({ hierarchy, item_key: container.item_key! });
-      const sub = await this.browse.load({
+  ): Promise<BrowseItem | null> {
+    for (let depth = 0; depth <= MAX_ACTION_DRILL_DEPTH; depth++) {
+      const loaded = await this.browse.load({
         hierarchy,
         offset: 0,
         count: LOAD_COUNT,
       });
-      return { action: pickAction(sub.items, labels), extraLevelsPushed: 1 };
+
+      const direct = pickAction(loaded.items, labels);
+      if (direct) return direct;
+
+      if (depth === MAX_ACTION_DRILL_DEPTH) break;
+
+      // Prefer an action-menu container; its children are the real actions.
+      let container = loaded.items.find((i) => i.hint === "action_list" && i.item_key);
+
+      if (!container) {
+        // Pass-through level: nothing actionable, only sub-lists (e.g. the
+        // album-versions page). Drill the first one — Roon lists the primary
+        // version first — and look again a level deeper.
+        const selectable = loaded.items.filter(isSelectable);
+        const allLists =
+          selectable.length > 0 && selectable.every((i) => i.hint === "list");
+        if (allLists) container = selectable[0];
+      }
+      if (!container) break;
+
+      // The drill is speculative discovery — if the Core rejects it, report
+      // "no play action" rather than surfacing a confusing browse error.
+      let drilled;
+      try {
+        drilled = await this.browse.browse({
+          hierarchy,
+          item_key: container.item_key!,
+        });
+      } catch {
+        break;
+      }
+      if (drilled.action !== "list") break;
     }
-    return { action: null, extraLevelsPushed: 0 };
+
+    return null;
   }
 
   /** Best-effort shuffle via Transport; returns false if unsupported/failed. */
@@ -400,9 +427,8 @@ export class PlaybackService {
 
   /**
    * Snapshot a zone's `(state, title, artist, album)` fingerprint before a
-   * playback action runs, so we can wait for the post-action change. Reads
-   * via the active subscription (or `get_zones` cold-start fallback). Returns
-   * `undefined` when no subscription is active and the zone isn't yet known
+   * playback action runs, so we can wait for the post-action change. Returns
+   * `undefined` when no subscription is active or the zone isn't yet known
    * — the caller falls back to the legacy immediate read.
    */
   private async captureFingerprint(
@@ -410,22 +436,7 @@ export class PlaybackService {
     zoneId: string,
   ): Promise<ReturnType<typeof fingerprintFor>> {
     if (!sub) return undefined;
-    const body = await sub.getSnapshot(() => this.coldStartGetZones());
-    return fingerprintFor(body, zoneId);
-  }
-
-  /** One-shot `get_zones` RPC for the cold-start case (no subscription yet). */
-  private coldStartGetZones(): Promise<GetZonesBody> {
-    const transport = this.roon.getTransport();
-    return new Promise<GetZonesBody>((resolve, reject) => {
-      transport.get_zones((err, result) => {
-        if (err) {
-          reject(new RoonMcpError("BROWSE_FAILED", `get_zones failed: ${err}`));
-          return;
-        }
-        resolve(result);
-      });
-    });
+    return fingerprintFor(await this.zones.getZonesBody(), zoneId);
   }
 
   /**
@@ -443,13 +454,7 @@ export class PlaybackService {
         return await this.zones.nowPlayingFor(zoneId);
       }
       const after = await sub.waitForZoneChange(zoneId, before);
-      const z = (after.zones ?? []).find(
-        (x) =>
-          x.zone_id === zoneId ||
-          (x.outputs ?? []).some((o) => o.output_id === zoneId),
-      );
-      const np = z?.now_playing;
-      return np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1;
+      return nowPlayingLine(findZone(after, zoneId));
     } catch {
       return undefined;
     }

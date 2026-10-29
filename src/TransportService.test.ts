@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { GetZonesBody, RoonApiTransport, RoonApiZone, RoonOutput } from "node-roon-api-transport";
+import type {
+  GetZonesBody,
+  RoonApiTransport,
+  RoonApiZone,
+  RoonOutput,
+  RoonQueueItem,
+} from "node-roon-api-transport";
 
 import { RoonClient } from "./RoonClient.js";
 import { TransportService } from "./TransportService.js";
@@ -31,17 +37,54 @@ interface RecordedMute {
   outputId: string;
   how: "mute" | "unmute";
 }
+interface RecordedSeek {
+  zone: string;
+  how: "absolute" | "relative";
+  seconds: number;
+}
+interface RecordedSettings {
+  zone: string;
+  settings: Record<string, unknown>;
+}
+
+interface HarnessOpts {
+  /** Queue snapshot served by the fake `subscribe_queue`. */
+  queueItems?: RoonQueueItem[];
+  /** When set, the fake `play_from_here` fails with this moo message name. */
+  playFromError?: string;
+}
 
 /** Builds a TransportService backed by a stub RoonClient with the given zones. */
-function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
+function serviceWith(zones: RoonApiZone[], defaultZone?: string, opts: HarnessOpts = {}): {
   svc: TransportService;
   controlCalls: RecordedControl[];
   volumeCalls: RecordedVolume[];
   muteCalls: RecordedMute[];
+  seekCalls: RecordedSeek[];
+  settingsCalls: RecordedSettings[];
+  pauseAllCalls: () => number;
+  muteAllCalls: Array<"mute" | "unmute">;
+  transferCalls: Array<{ from: string; to: string }>;
+  groupCalls: string[][];
+  ungroupCalls: string[][];
+  queueSubCalls: Array<{ zone: string; limit: number }>;
+  unsubscribeCount: () => number;
+  playFromCalls: Array<{ zone: string; queueItemId: number }>;
 } {
   const controlCalls: RecordedControl[] = [];
   const volumeCalls: RecordedVolume[] = [];
   const muteCalls: RecordedMute[] = [];
+  const seekCalls: RecordedSeek[] = [];
+  const settingsCalls: RecordedSettings[] = [];
+  const muteAllCalls: Array<"mute" | "unmute"> = [];
+  const transferCalls: Array<{ from: string; to: string }> = [];
+  const groupCalls: string[][] = [];
+  const ungroupCalls: string[][] = [];
+  const asId = (o: string | RoonOutput) => (typeof o === "string" ? o : o.output_id);
+  const queueSubCalls: Array<{ zone: string; limit: number }> = [];
+  const playFromCalls: Array<{ zone: string; queueItemId: number }> = [];
+  let pauseAlls = 0;
+  let unsubscribes = 0;
 
   const stub = {
     waitForCore: async () => undefined,
@@ -75,13 +118,84 @@ function serviceWith(zones: RoonApiZone[], defaultZone?: string): {
         muteCalls.push({ outputId, how });
         cb?.(false);
       },
+      seek: (
+        zoneOrOutput: string,
+        how: "absolute" | "relative",
+        seconds: number,
+        cb?: (e: string | false) => void,
+      ) => {
+        seekCalls.push({ zone: zoneOrOutput, how, seconds });
+        cb?.(false);
+      },
+      change_settings: (
+        zoneOrOutput: string,
+        settings: Record<string, unknown>,
+        cb?: (e: string | false) => void,
+      ) => {
+        settingsCalls.push({ zone: zoneOrOutput, settings });
+        cb?.(false);
+      },
+      pause_all: (cb?: (e: string | false) => void) => {
+        pauseAlls++;
+        cb?.(false);
+      },
+      mute_all: (how: "mute" | "unmute", cb?: (e: string | false) => void) => {
+        muteAllCalls.push(how);
+        cb?.(false);
+      },
+      transfer_zone: (from: string, to: string, cb?: (e: string | false) => void) => {
+        transferCalls.push({ from, to });
+        cb?.(false);
+      },
+      group_outputs: (outputs: Array<string | RoonOutput>, cb?: (e: string | false) => void) => {
+        groupCalls.push(outputs.map(asId));
+        cb?.(false);
+      },
+      ungroup_outputs: (outputs: Array<string | RoonOutput>, cb?: (e: string | false) => void) => {
+        ungroupCalls.push(outputs.map(asId));
+        cb?.(false);
+      },
+      // Fires the snapshot synchronously — deliberately exercises the
+      // "callback before the handle is assigned" guard in getQueue.
+      subscribe_queue: (
+        zoneOrOutput: string,
+        maxItemCount: number,
+        cb: (response: string, body: { items?: RoonQueueItem[] }) => void,
+      ) => {
+        queueSubCalls.push({ zone: zoneOrOutput, limit: maxItemCount });
+        cb("Subscribed", { items: opts.queueItems ?? [] });
+        return { unsubscribe: () => unsubscribes++ };
+      },
+      play_from_here: (
+        zoneOrOutput: string,
+        queueItemId: number,
+        cb?: (msg: { name: string } | undefined, body: unknown) => void,
+      ) => {
+        playFromCalls.push({ zone: zoneOrOutput, queueItemId });
+        cb?.({ name: opts.playFromError ?? "Success" }, {});
+      },
     }),
     getActiveSubscription: () => undefined,
   } as unknown as RoonClient;
 
   const zoneSvc = new ZoneService(stub, undefined, defaultZone);
   const svc = new TransportService(stub, zoneSvc);
-  return { svc, controlCalls, volumeCalls, muteCalls };
+  return {
+    svc,
+    controlCalls,
+    volumeCalls,
+    muteCalls,
+    seekCalls,
+    settingsCalls,
+    pauseAllCalls: () => pauseAlls,
+    muteAllCalls,
+    transferCalls,
+    groupCalls,
+    ungroupCalls,
+    queueSubCalls,
+    unsubscribeCount: () => unsubscribes,
+    playFromCalls,
+  };
 }
 
 test("getNowPlaying returns a structured snapshot of a playing zone", async () => {
@@ -110,7 +224,47 @@ test("getNowPlaying returns a structured snapshot of a playing zone", async () =
     imageKey: "img:1",
     lengthSec: 240,
     seekPositionSec: 42,
+    volumePercent: undefined,
+    isMuted: false,
   } satisfies NowPlayingInfo);
+});
+
+test("getNowPlaying exposes volume percent and mute state (issue #10)", async () => {
+  // Output with a 0–60 range at value 30 → 50%; muted.
+  const { svc } = serviceWith([
+    zone({
+      zone_id: "z1",
+      state: "playing",
+      now_playing: { one_line: { line1: "X" } },
+      outputs: [
+        {
+          output_id: "o1",
+          zone_id: "z1",
+          display_name: "Office",
+          volume: { min: 0, max: 60, value: 30, is_muted: true },
+        },
+      ],
+    }),
+  ]);
+  const info = await svc.getNowPlaying();
+  assert.equal(info?.volumePercent, 50);
+  assert.equal(info?.isMuted, true);
+
+  // A grouped zone reports muted if any output is muted, and the first
+  // numeric-range output's percent.
+  const { svc: svc2 } = serviceWith([
+    zone({
+      zone_id: "z2",
+      state: "playing",
+      outputs: [
+        { output_id: "o1", zone_id: "z2", display_name: "L", volume: { min: 0, max: 100, value: 25, is_muted: false } },
+        { output_id: "o2", zone_id: "z2", display_name: "R", volume: { type: "incremental", is_muted: true } },
+      ],
+    }),
+  ]);
+  const info2 = await svc2.getNowPlaying();
+  assert.equal(info2?.volumePercent, 25);
+  assert.equal(info2?.isMuted, true);
 });
 
 test("getNowPlaying falls back through three/two/one line displays", async () => {
@@ -132,6 +286,8 @@ test("getNowPlaying falls back through three/two/one line displays", async () =>
     imageKey: undefined,
     lengthSec: undefined,
     seekPositionSec: undefined,
+    volumePercent: undefined,
+    isMuted: false,
   } satisfies NowPlayingInfo);
 
   // One-line only — both `artist` and `album` should be undefined.
@@ -165,6 +321,32 @@ test("getNowPlaying rejects an unknown zone id with ZONE_NOT_FOUND", async () =>
   );
 });
 
+test("getNowPlaying throws ZONE_NOT_FOUND (not undefined) if the zone vanishes mid-call (issue #9)", async () => {
+  // Simulate the race: `resolveTarget` reads the zone on the first get_zones
+  // call, then the zone is gone by the time getNowPlaying re-reads it. The
+  // tool layer must never serialize an `undefined` payload.
+  const z = zone({ zone_id: "z1", state: "playing", now_playing: { one_line: { line1: "X" } } });
+  let calls = 0;
+  const stub = {
+    waitForCore: async () => undefined,
+    getTransport: () => ({
+      get_zones: (cb: (e: string | false, b: GetZonesBody) => void) => {
+        calls++;
+        cb(false, { zones: calls === 1 ? [z] : [] });
+      },
+      subscribe_zones: () => {},
+    }),
+    getActiveSubscription: () => undefined,
+  } as unknown as RoonClient;
+  const zoneSvc = new ZoneService(stub);
+  const svc = new TransportService(stub, zoneSvc);
+
+  await assert.rejects(
+    svc.getNowPlaying("z1"),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_NOT_FOUND",
+  );
+});
+
 test("control rejects an unknown action with BROWSE_FAILED", async () => {
   const { svc } = serviceWith([zone({ zone_id: "z1", state: "playing" })]);
   await assert.rejects(
@@ -190,6 +372,20 @@ test("control('resume') maps to Roon's 'play' verb", async () => {
   ]);
   await svc.control("z1", "resume");
   assert.deepEqual(controlCalls, [{ zone: "z1", control: "play" }]);
+});
+
+test("control('resume') on an already-playing zone is a no-op success (issue #7)", async () => {
+  // Roon reports is_play_allowed === false while playing; resume should be a
+  // no-op rather than "Action resume is not available".
+  const { svc, controlCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_play_allowed: false }),
+  ]);
+  const out = await svc.control("z1", "resume");
+  assert.equal(out.ok, true);
+  assert.equal(out.action, "resume");
+  assert.equal(out.state, "playing");
+  // No transport call issued — nothing to resume.
+  assert.deepEqual(controlCalls, []);
 });
 
 test("control('next') is refused when is_next_allowed is false", async () => {
@@ -306,6 +502,37 @@ test("setVolume throws when every output is incremental", async () => {
   );
 });
 
+test("setVolume targets only the named output, not the whole group (issue #14)", async () => {
+  // Passing an output id must change just that output — fanning out across the
+  // grouped zone would silently change the other speaker too.
+  const { svc, volumeCalls } = serviceWith([
+    zone({
+      zone_id: "z1",
+      outputs: [
+        { output_id: "o1", zone_id: "z1", display_name: "L", volume: { min: 0, max: 100 } },
+        { output_id: "o2", zone_id: "z1", display_name: "R", volume: { min: 0, max: 100 } },
+      ],
+    }),
+  ]);
+  const out = await svc.setVolume("o2", 40);
+  assert.deepEqual(out.applied, ["o2"]);
+  assert.deepEqual(volumeCalls, [{ outputId: "o2", how: "absolute", value: 40 }]);
+});
+
+test("mute targets only the named output, not the whole group (issue #14)", async () => {
+  const { svc, muteCalls } = serviceWith([
+    zone({
+      zone_id: "z1",
+      outputs: [
+        { output_id: "o1", zone_id: "z1", display_name: "L" },
+        { output_id: "o2", zone_id: "z1", display_name: "R" },
+      ],
+    }),
+  ]);
+  await svc.mute("o1", true);
+  assert.deepEqual(muteCalls, [{ outputId: "o1", how: "mute" }]);
+});
+
 test("mute fans out to every output with the requested how", async () => {
   const { svc, muteCalls } = serviceWith([
     zone({
@@ -332,6 +559,68 @@ test("mute fans out to every output with the requested how", async () => {
     { outputId: "o1", how: "unmute" },
     { outputId: "o2", how: "unmute" },
   ]);
+});
+
+test("control('playpause') issues the native playpause verb (issue #17)", async () => {
+  const { svc, controlCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing" }),
+  ]);
+  const out = await svc.control("z1", "playpause");
+  assert.equal(out.ok, true);
+  assert.equal(out.action, "playpause");
+  // playpause is exempt from the allowed-flag precheck (it's a toggle), so it
+  // must pass through without consulting is_play_allowed/is_pause_allowed.
+  assert.deepEqual(controlCalls, [{ zone: "z1", control: "playpause" }]);
+});
+
+test("seek issues an absolute seek to the target position (issue #17)", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: true }),
+  ]);
+  const out = await svc.seek("z1", 90);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", mode: "absolute", seconds: 90 });
+  assert.deepEqual(seekCalls, [{ zone: "z1", how: "absolute", seconds: 90 }]);
+});
+
+test("seek in relative mode moves by a signed delta (issue #17)", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: true }),
+  ]);
+  await svc.seek("z1", -10, "relative");
+  assert.deepEqual(seekCalls, [{ zone: "z1", how: "relative", seconds: -10 }]);
+});
+
+test("seek is refused when is_seek_allowed is false", async () => {
+  const { svc, seekCalls } = serviceWith([
+    zone({ zone_id: "z1", state: "playing", is_seek_allowed: false }),
+  ]);
+  await assert.rejects(
+    svc.seek("z1", 0),
+    (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+  );
+  assert.deepEqual(seekCalls, []);
+});
+
+test("seek rejects a negative absolute position", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1", state: "playing" })]);
+  await assert.rejects(
+    svc.seek("z1", -5),
+    (e) => e instanceof RoonMcpError && e.code === "BROWSE_FAILED",
+  );
+});
+
+test("setLoop maps each mode to Roon's native loop value (issue #17)", async () => {
+  const cases: Array<{ mode: "off" | "all" | "one"; roon: string }> = [
+    { mode: "off", roon: "disabled" },
+    { mode: "all", roon: "loop" },
+    { mode: "one", roon: "loop_one" },
+  ];
+  for (const { mode, roon } of cases) {
+    const { svc, settingsCalls } = serviceWith([zone({ zone_id: "z1" })]);
+    const out = await svc.setLoop("z1", mode);
+    assert.deepEqual(out, { ok: true, zoneId: "z1", mode });
+    assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { loop: roon } }]);
+  }
 });
 
 /**
@@ -424,4 +713,143 @@ test("control falls back to the latest snapshot when no Changed event arrives", 
   ]);
   const out = await svc.control("z1", "resume");
   assert.equal(out.state, "paused");
+});
+
+// --- whole-house verbs / Roon Radio -----------------------------------------
+
+test("pauseAll and muteAll call the Core-wide transport verbs", async () => {
+  const { svc, pauseAllCalls, muteAllCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  assert.deepEqual(await svc.pauseAll(), { ok: true, action: "pause_all" });
+  assert.equal(pauseAllCalls(), 1);
+  assert.deepEqual(await svc.muteAll(true), { ok: true, muted: true });
+  assert.deepEqual(await svc.muteAll(false), { ok: true, muted: false });
+  assert.deepEqual(muteAllCalls, ["mute", "unmute"]);
+});
+
+test("setAutoRadio sends change_settings with the auto_radio flag", async () => {
+  const { svc, settingsCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.setAutoRadio("z1", true);
+  assert.deepEqual(settingsCalls, [{ zone: "z1", settings: { auto_radio: true } }]);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", autoRadio: true });
+});
+
+// --- queue read-back / play-from-here --------------------------------------
+
+test("getQueue maps the snapshot to 1-based entries and unsubscribes immediately", async () => {
+  const items: RoonQueueItem[] = [
+    {
+      queue_item_id: 101,
+      length: 240,
+      image_key: "img:1",
+      three_line: { line1: "A Walk", line2: "Tycho", line3: "Dive" },
+    },
+    { queue_item_id: 102, two_line: { line1: "Gymnopédie No.1", line2: "Erik Satie" } },
+  ];
+  const { svc, queueSubCalls, unsubscribeCount } = serviceWith(
+    [zone({ zone_id: "z1" })],
+    undefined,
+    { queueItems: items },
+  );
+
+  const out = await svc.getQueue("z1", 10);
+  assert.deepEqual(queueSubCalls, [{ zone: "z1", limit: 10 }]);
+  assert.equal(unsubscribeCount(), 1, "one-shot read must tear the subscription down");
+  assert.equal(out.zoneId, "z1");
+  assert.deepEqual(out.entries, [
+    {
+      position: 1,
+      queueItemId: 101,
+      title: "A Walk",
+      artist: "Tycho",
+      album: "Dive",
+      lengthSec: 240,
+      imageKey: "img:1",
+    },
+    {
+      position: 2,
+      queueItemId: 102,
+      title: "Gymnopédie No.1",
+      artist: "Erik Satie",
+      album: undefined,
+      lengthSec: undefined,
+      imageKey: undefined,
+    },
+  ]);
+  assert.equal(out.message, undefined);
+});
+
+test("getQueue reports an empty queue with a message", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.getQueue("z1");
+  assert.deepEqual(out.entries, []);
+  assert.equal(out.message, "The queue is empty.");
+});
+
+test("playFromHere passes the resolved zone and queue item id", async () => {
+  const { svc, playFromCalls } = serviceWith([zone({ zone_id: "z1" })]);
+  const out = await svc.playFromHere("z1", 42);
+  assert.deepEqual(playFromCalls, [{ zone: "z1", queueItemId: 42 }]);
+  assert.deepEqual(out, { ok: true, zoneId: "z1", queueItemId: 42 });
+});
+
+test("playFromHere surfaces a non-Success moo message as BROWSE_FAILED", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })], undefined, {
+    playFromError: "InvalidRequest",
+  });
+  await assert.rejects(
+    () => svc.playFromHere("z1", 42),
+    (e: unknown) =>
+      e instanceof RoonMcpError && e.code === "BROWSE_FAILED" && /InvalidRequest/.test(e.message),
+  );
+});
+
+// --- transfer / grouping ----------------------------------------------------
+
+test("transferZone resolves both ends (name substrings included)", async () => {
+  const { svc, transferCalls } = serviceWith([
+    zone({ zone_id: "z1", display_name: "Office" }),
+    zone({ zone_id: "z2", display_name: "Kitchen" }),
+  ]);
+  const out = await svc.transferZone("Office", "Kitchen");
+  assert.deepEqual(transferCalls, [{ from: "z1", to: "z2" }]);
+  assert.deepEqual(out, { ok: true, fromZoneId: "z1", toZoneId: "z2" });
+});
+
+test("transferZone refuses when source and destination are the same zone", async () => {
+  const { svc, transferCalls } = serviceWith([zone({ zone_id: "z1", display_name: "Office" })]);
+  await assert.rejects(
+    () => svc.transferZone("z1", "Office"),
+    (e: unknown) => e instanceof RoonMcpError && /same zone/.test(e.message),
+  );
+  assert.equal(transferCalls.length, 0);
+});
+
+test("groupOutputs expands zone entries to their output ids, first entry's queue first", async () => {
+  const grouped = zone({
+    zone_id: "z1",
+    display_name: "Living Room",
+    outputs: [
+      { output_id: "o1", zone_id: "z1", display_name: "Left" },
+      { output_id: "o2", zone_id: "z1", display_name: "Right" },
+    ],
+  });
+  const { svc, groupCalls } = serviceWith([grouped, zone({ zone_id: "z2", display_name: "Kitchen" })]);
+  const out = await svc.groupOutputs(["Living Room", "Kitchen"], "group");
+  assert.deepEqual(groupCalls, [["o1", "o2", "o:z2"]]);
+  assert.deepEqual(out, { ok: true, action: "group", outputIds: ["o1", "o2", "o:z2"] });
+});
+
+test("groupOutputs requires at least two entries to group", async () => {
+  const { svc } = serviceWith([zone({ zone_id: "z1" })]);
+  await assert.rejects(
+    () => svc.groupOutputs(["z1"], "group"),
+    (e: unknown) => e instanceof RoonMcpError && /at least 2/.test(e.message),
+  );
+});
+
+test("ungroup accepts a single zone and detaches its outputs", async () => {
+  const { svc, ungroupCalls } = serviceWith([zone({ zone_id: "z2", display_name: "Kitchen" })]);
+  const out = await svc.groupOutputs(["Kitchen"], "ungroup");
+  assert.deepEqual(ungroupCalls, [["o:z2"]]);
+  assert.equal(out.action, "ungroup");
 });

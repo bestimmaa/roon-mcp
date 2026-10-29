@@ -10,7 +10,7 @@ import type {
 } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
-import { GenreService, MIN_GENRE_SCORE, scoreGenre } from "./GenreService.js";
+import { GenreService, INDEX_TTL_MS, MIN_GENRE_SCORE, scoreGenre } from "./GenreService.js";
 import { decodeLocator, isGenreLocator } from "./locator.js";
 import { RoonClient } from "./RoonClient.js";
 
@@ -177,4 +177,40 @@ test("the genre index is built once and reused across searches", async () => {
   await svc.searchGenres("Trance", 10);
   await svc.searchGenres("Jazz", 10);
   assert.equal(fake.rootResets, 1, "the tree should be walked only once (cached)");
+});
+
+/** GenreService with an injectable clock, to drive TTL expiry deterministically. */
+class ClockGenreService extends GenreService {
+  constructor(browse: BrowseSessionManager, private readonly time: () => number) {
+    super(browse);
+  }
+  protected override now(): number {
+    return this.time();
+  }
+}
+
+test("the genre index is rebuilt after the TTL expires (issue #18)", async () => {
+  // A genre added/removed/renamed in Roon must surface eventually — the cache
+  // can't live for the whole session.
+  const fake = new FakeGenres(buildTree());
+  const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
+  let t = 1_000_000;
+  const svc = new ClockGenreService(new BrowseSessionManager(stub), () => t);
+
+  await svc.searchGenres("Trance", 10);
+  assert.equal(fake.rootResets, 1, "first search builds the index");
+  // While fresh, subsequent searches reuse the cache.
+  await svc.searchGenres("Jazz", 10);
+  assert.equal(fake.rootResets, 1, "fresh index is reused");
+  // Past the TTL, the next search rebuilds, picking up library changes.
+  t += INDEX_TTL_MS + 1;
+  await svc.searchGenres("Jazz", 10);
+  assert.equal(fake.rootResets, 2, "expired index is rebuilt");
+});
+
+test("concurrent searches share a single in-flight index build", async () => {
+  // Two searches racing must not kick off two tree walks.
+  const { svc, fake } = buildService();
+  await Promise.all([svc.searchGenres("Trance", 10), svc.searchGenres("Jazz", 10)]);
+  assert.equal(fake.rootResets, 1, "the in-flight build is shared, not duplicated");
 });

@@ -7,7 +7,7 @@ import type {
 
 import { RoonClient } from "./RoonClient.js";
 import { silentLogger, type RoonCallLogger } from "./logger.js";
-import { ZoneSubscription } from "./ZoneSubscription.js";
+import { findZone, ZoneSubscription } from "./ZoneSubscription.js";
 import { RoonMcpError, type RoonZone, type ZoneState } from "./types.js";
 
 export interface ZoneResolutionAmbiguous {
@@ -22,7 +22,7 @@ export interface ResolvedZoneTarget {
   zone: RoonZone;
 }
 
-function mapState(state: RoonZoneState | undefined): ZoneState {
+export function mapState(state: RoonZoneState | undefined): ZoneState {
   switch (state) {
     case "playing":
     case "paused":
@@ -32,6 +32,25 @@ function mapState(state: RoonZoneState | undefined): ZoneState {
     default:
       return "unknown";
   }
+}
+
+/** Exact display-name matches if any, else substring matches (case-insensitive). */
+function matchByName(zones: RoonZone[], name: string): RoonZone[] {
+  const needle = name.trim().toLowerCase();
+  const exact = zones.filter((z) => z.displayName.toLowerCase() === needle);
+  return exact.length
+    ? exact
+    : zones.filter((z) => z.displayName.toLowerCase().includes(needle));
+}
+
+function candidatesOf(zones: RoonZone[]): { zoneId: string; displayName: string }[] {
+  return zones.map((z) => ({ zoneId: z.zoneId, displayName: z.displayName }));
+}
+
+/** Best-effort "now playing" one-liner for a raw zone. */
+export function nowPlayingLine(zone: RoonApiZone | undefined): string | undefined {
+  const np = zone?.now_playing;
+  return np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1;
 }
 
 function toRoonZone(zone: RoonApiZone): RoonZone {
@@ -72,7 +91,9 @@ export class ZoneService {
 
   /**
    * Resolve the zone a playback call should target.
-   * - Explicit id (zone or output): used as-is; unknown id → `ZONE_NOT_FOUND`.
+   * - Explicit id (zone or output): used as-is. If nothing matches as an id,
+   *   fall back to display-name matching — the tool contract promises "an id,
+   *   or a name substring like 'Office'". Still nothing → `ZONE_NOT_FOUND`.
    * - Omitted: fall back to the configured default (matched as an id first,
    *   then as a display name), else the single/Office/playing heuristics.
    * Returns `ZONE_AMBIGUOUS` when no single zone can be chosen.
@@ -80,14 +101,25 @@ export class ZoneService {
   async resolveTarget(explicitId?: string): Promise<ResolvedZoneTarget> {
     if (explicitId) {
       const zone = await this.findZone(explicitId);
-      if (!zone) {
+      if (zone) {
+        // Preserve the caller's id (it may be an output id) as the action target.
+        return { targetId: explicitId, zone };
+      }
+      // Strict name matching only — no single-zone shortcut, so a garbage id
+      // never silently redirects to an unrelated zone.
+      const matches = matchByName(await this.listZones(), explicitId);
+      if (matches.length === 1) return { targetId: matches[0]!.zoneId, zone: matches[0]! };
+      if (matches.length > 1) {
         throw new RoonMcpError(
-          "ZONE_NOT_FOUND",
-          `No zone or output matches id "${explicitId}". Call list_zones for current ids.`,
+          "ZONE_AMBIGUOUS",
+          `"${explicitId}" matches multiple zones; pass an explicit zoneId.`,
+          { candidates: candidatesOf(matches) },
         );
       }
-      // Preserve the caller's id (it may be an output id) as the action target.
-      return { targetId: explicitId, zone };
+      throw new RoonMcpError(
+        "ZONE_NOT_FOUND",
+        `No zone or output matches "${explicitId}". Call list_zones for current ids and names.`,
+      );
     }
 
     // A configured default may be a zone/output id…
@@ -104,7 +136,7 @@ export class ZoneService {
         this.defaultZone
           ? `Default zone "${this.defaultZone}" matches multiple zones; pass an explicit zoneId.`
           : "Multiple zones available; set ROON_DEFAULT_ZONE or pass an explicit zoneId.",
-        { candidates: resolved.candidates.map((z) => ({ zoneId: z.zoneId, displayName: z.displayName })) },
+        { candidates: candidatesOf(resolved.candidates) },
       );
     }
     return { targetId: resolved.zoneId, zone: resolved };
@@ -112,22 +144,19 @@ export class ZoneService {
 
   /** Best-effort "now playing" one-liner for a zone or output id. */
   async nowPlayingFor(idOrOutput: string): Promise<string | undefined> {
-    const np = (await this.findRawZone(idOrOutput))?.now_playing;
-    return (
-      np?.two_line?.line1 ?? np?.one_line?.line1 ?? np?.three_line?.line1 ?? undefined
-    );
+    return nowPlayingLine(await this.findRawZone(idOrOutput));
   }
 
-  private async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
-    const body = await this.getZonesBody();
-    return (body.zones ?? []).find(
-      (z) =>
-        z.zone_id === idOrOutput ||
-        (z.outputs ?? []).some((o) => o.output_id === idOrOutput),
-    );
+  /** The raw Roon zone for a zone or output id, from the current snapshot. */
+  async findRawZone(idOrOutput: string): Promise<RoonApiZone | undefined> {
+    return findZone(await this.getZonesBody(), idOrOutput);
   }
 
-  private async getZonesBody(): Promise<GetZonesBody> {
+  /**
+   * The current zone snapshot: the subscription cache when warm, else a
+   * logged one-shot `get_zones`.
+   */
+  async getZonesBody(): Promise<GetZonesBody> {
     await this.roon.waitForCore();
     const transport = this.roon.getTransport();
     const sub: ZoneSubscription | undefined = this.roon.getActiveSubscription();
@@ -175,15 +204,9 @@ export class ZoneService {
     if (zones.length === 1) return zones[0]!;
 
     if (preferredName) {
-      const needle = preferredName.trim().toLowerCase();
-      const exact = zones.filter((z) => z.displayName.toLowerCase() === needle);
-      if (exact.length === 1) return exact[0]!;
-
-      const fuzzy = zones.filter((z) =>
-        z.displayName.toLowerCase().includes(needle),
-      );
-      if (fuzzy.length === 1) return fuzzy[0]!;
-      if (fuzzy.length > 1) return { ambiguous: true, candidates: fuzzy };
+      const matches = matchByName(zones, preferredName);
+      if (matches.length === 1) return matches[0]!;
+      if (matches.length > 1) return { ambiguous: true, candidates: matches };
       throw new RoonMcpError(
         "ZONE_NOT_FOUND",
         `No zone matches "${preferredName}".`,

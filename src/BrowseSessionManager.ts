@@ -114,7 +114,7 @@ export class BrowseSessionManager {
 }
 
 /** A stale browse session / popped item key surfaces as INVALID_ITEM_KEY. */
-function isStaleSession(err: unknown): boolean {
+export function isStaleSession(err: unknown): err is RoonMcpError {
   return err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY";
 }
 

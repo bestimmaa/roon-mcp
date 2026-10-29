@@ -4,6 +4,117 @@ All notable changes to this project will be documented in this file.
 
 The version history source of truth is git tags in the format `vMAJOR.MINOR.PATCH`.
 
+## [0.5.1] - 2026-09-23
+
+### Fixed
+
+- The release script now derives the GitHub repo slug from `package.json`
+  `"repository"` instead of a hardcoded `bestimmaa/roon-mcp`, so its remote
+  helpers describe the package actually being released. All npm repository
+  forms are handled (`owner/repo`, `github:owner/repo`, https/ssh/scp-style
+  URLs), and an unparseable repository now fails with the script's usual
+  one-line error and exit 1 rather than throwing at import (#43). Tooling
+  only — no change to the shipped server.
+
+## [0.5.0] - 2026-08-12
+
+### Added
+
+- Whole-house control: `pause_all` pauses every zone on the Core, `mute_all`
+  mutes/unmutes every mutable zone, and `set_auto_radio` turns Roon Radio
+  on/off for a zone (#38).
+- `get_queue` reads a zone's upcoming play queue (1-based positions, track
+  info, and a `queueItemId` per entry), and `play_queue_item` jumps playback
+  to one of those entries without rebuilding the queue (#36).
+- `transfer_zone` moves the playing queue from one zone to another, and
+  `group_outputs`/`ungroup_outputs` synchronize outputs into one zone or
+  split them back apart (#37).
+
+### Fixed
+
+- Concurrent `roon-mcp` instances (multiple MCP client sessions, or orphaned
+  processes from closed terminals) no longer fight over Roon's single
+  pairing slot. A single-owner lock file (`instance.lock`, next to
+  `config.json`) now makes every instance but the first fail fast with a new
+  `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
+  flapping between paired/unpaired for minutes (issue #40).
+
+### Changed
+
+- README: documented `ROON_HOST`/`ROON_PORT` (landed in 0.4.0 but never made
+  the Configuration table) and the new whole-house/queue/grouping tools;
+  fixed a dead anchor link in the `search_music` description and a stale
+  list of logged Roon API ops.
+
+## [0.4.0] - 2026-07-17
+
+### Added
+
+- Optional direct connection to a known Core via `ROON_HOST` (and
+  `ROON_PORT`, default 9330), for networks where SOOD multicast discovery
+  doesn't survive — VLAN-segmented setups, VPNs, containers. Discovery
+  remains the default; behavior is unchanged when `ROON_HOST` is unset
+  (#34).
+
+### Fixed
+
+- An explicit playback target now resolves by display name, not just by
+  id. The tool contract already advertised "an id, or a name substring
+  like 'Office'", but a name passed as an explicit target threw
+  `ZONE_NOT_FOUND`; it now matches exact-then-substring, reporting
+  `ZONE_AMBIGUOUS` with candidates when several zones match (#32).
+- Albums opened from search often land on a "versions" pass-through page,
+  so `findAction` never found "Play Album" and playback silently failed.
+  It now drills through bounded container levels to reach the real play
+  action, only descending pure pass-through levels so mixed action/list
+  levels are never mis-drilled (#33).
+
+## [0.3.0] - 2026-07-04
+
+### Added
+
+- `now_playing` now reports `volumePercent` and `isMuted` (issue #10), so
+  relative volume requests like "make it louder" have something to compute
+  from.
+- `control_playback` gains a `playpause` verb, and two new tools land:
+  `seek` (absolute position or relative delta) and `set_loop`
+  (off/all/one) (issue #17).
+- `play_now` accepts `addToQueue: true` to append to the zone's existing
+  queue instead of replacing it.
+
+### Fixed
+
+- The MCP server handshake reported a hard-coded `0.1.0` instead of the
+  real package version (issue #6).
+- Unexpected errors were mislabeled `BROWSE_FAILED`; they now use a
+  dedicated `INTERNAL_ERROR` code so an agent doesn't retry a genuine bug
+  as if it were a browse hiccup (issue #13).
+- `console.error` now routes through the same stderr redirect as the other
+  console methods, for uniform log formatting (issue #15).
+- `now_playing` threw an unshaped `undefined` instead of `ZONE_NOT_FOUND`
+  when a zone vanished mid-request (issue #9).
+- `enqueue_and_play` no longer warns about shuffle being off when
+  `change_settings` is simply unavailable — a common, harmless case on
+  older transports (issue #11).
+- A pending `waitForCore` call now rejects immediately with
+  `NO_CORE_PAIRED` when the Core unpairs or the client stops, instead of
+  hanging until its timeout (issue #16).
+- Library search candidates no longer carry a stray result count (e.g.
+  `"Artists (12)"`) in `sourceGroup` (issue #12).
+- `control_playback(resume)` is now a no-op on an already-playing zone
+  instead of failing with "Action resume is not available" (issue #7).
+- `set_volume`/`mute` targeting a single output in a grouped zone no
+  longer fans out to every output in the group (issue #14).
+- The genre search index now expires after 60 minutes so genres
+  added/removed/renamed in Roon eventually surface without a restart
+  (issue #18).
+
+### Changed
+
+- README: clarified that streaming search/transport support isn't
+  Tidal-specific, and simplified the streaming search and transport
+  sections for non-technical readers.
+
 ## [0.2.3] - 2026-06-22
 
 ### Fixed

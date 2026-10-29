@@ -1,31 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
-import { RoonMcpError } from "./types.js";
-
-const MUSIC_ITEM_TYPES = [
-  "artist",
-  "album",
-  "track",
-  "genre",
-  "playlist",
-  "radio",
-  "unknown",
-] as const;
+import { MUSIC_ITEM_TYPES, RoonMcpError, TRANSPORT_ACTIONS } from "./types.js";
+import pkg from "../package.json" with { type: "json" };
 
 /**
  * Owns MCP startup and tool registration, and maps tool calls to services.
- * Milestone 1 ships only `list_zones`.
  */
 export class RoonMcpServer {
   private readonly server: McpServer;
+  /** MCP server version — tracks the package version (issue #6). */
+  readonly version = pkg.version;
 
   constructor(
     private readonly roon: RoonClient,
@@ -34,10 +28,11 @@ export class RoonMcpServer {
     private readonly tracks: TrackExpansionService,
     private readonly playback: PlaybackService,
     private readonly transport: TransportService,
+    private readonly libraryExport: LibraryExportService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
-      version: "0.1.0",
+      version: this.version,
     });
     this.registerTools();
   }
@@ -56,16 +51,12 @@ export class RoonMcpServer {
           "first if no zone is obvious and ROON_DEFAULT_ZONE is not set.",
         inputSchema: {},
       },
-      async () => {
-        try {
-          const zones = await this.zones.listZones();
-          const message =
-            zones.length === 0 ? "No zones available on the paired Core." : undefined;
-          return structured({ zones, ...(message ? { message } : {}) });
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle(async () => {
+        const zones = await this.zones.listZones();
+        const message =
+          zones.length === 0 ? "No zones available on the paired Core." : undefined;
+        return { zones, ...(message ? { message } : {}) };
+      }),
     );
 
     this.server.registerTool(
@@ -128,14 +119,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.search.searchMusic(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.search.searchMusic(args)),
     );
 
     this.server.registerTool(
@@ -169,14 +153,7 @@ export class RoonMcpServer {
             .describe("Max tracks to return (default 10)."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.tracks.getTracksFor(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.tracks.getTracksFor(args)),
     );
 
     this.server.registerTool(
@@ -227,14 +204,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.playback.playNow(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.playback.playNow(args)),
     );
 
     this.server.registerTool(
@@ -277,14 +247,7 @@ export class RoonMcpServer {
             .describe("Shuffle the queue; omit to leave the zone's setting unchanged."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.playback.enqueueAndPlay(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.playback.enqueueAndPlay(args)),
     );
 
     this.server.registerTool(
@@ -298,10 +261,13 @@ export class RoonMcpServer {
           "the kitchen?\", \"who's this?\", \"what's the current track?\", " +
           "\"what song is this?\"). Returns a structured snapshot: zone id and " +
           "name, playback state (playing/paused/loading/stopped), title, " +
-          "artist, album, and the current seek position when available. " +
+          "artist, album, the current seek position, and the zone's " +
+          "`volumePercent` (0–100) and `isMuted` flag when available. " +
           "`title`/`artist`/`album` are undefined when nothing is playing. " +
           "Call this before pause/skip/volume changes when the user hasn't " +
           "named a zone — it confirms where to act and what the state is. " +
+          "For relative \"louder\"/\"softer\" requests, read `volumePercent` " +
+          "here, add/subtract a delta, and pass the result to set_volume. " +
           "zoneId is optional: omit to use ROON_DEFAULT_ZONE, or fall back " +
           "to the only zone / an \"Office\" zone / the currently-playing zone; " +
           "if it still can't decide it returns ZONE_AMBIGUOUS so the agent " +
@@ -318,31 +284,26 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const info = await this.transport.getNowPlaying(args.zoneId);
-          return structured(info);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.getNowPlaying(args.zoneId)),
     );
 
     this.server.registerTool(
       "control_playback",
       {
-        title: "Run a Roon transport verb (pause/resume/next/previous/stop)",
+        title: "Run a Roon transport verb (pause/resume/next/previous/stop/playpause)",
         description:
           "Use this for the common transport verbs — pause, resume, skip, " +
-          "next track, previous track, stop (e.g. \"pause\", \"pause the " +
-          "kitchen\", \"skip\", \"next track\", \"next song\", \"play the " +
-          "next song\", \"resume\", \"resume in the office\", \"stop\", " +
-          "\"stop the music\"). Runs one transport verb against the resolved " +
-          "zone. For \"louder\"/\"softer\" without a number, call now_playing " +
-          "first to read the current state, then set_volume with a target " +
-          "percent — this tool is verbs only. zoneId is optional and resolves " +
-          "like now_playing. Returns the resolved zoneId, the action taken, " +
-          "and the resulting playback state.",
+          "next track, previous track, stop, or toggle play/pause (e.g. " +
+          "\"pause\", \"pause the kitchen\", \"skip\", \"next track\", \"next " +
+          "song\", \"play the next song\", \"resume\", \"resume in the " +
+          "office\", \"stop\", \"stop the music\", \"play/pause\", \"toggle " +
+          "playback\"). Runs one transport verb against the resolved zone. " +
+          "'playpause' toggles between playing and paused. For \"louder\"/" +
+          "\"softer\" without a number, call now_playing first to read the " +
+          "current state, then set_volume with a target percent — this tool " +
+          "is verbs only. zoneId is optional and resolves like now_playing. " +
+          "Returns the resolved zoneId, the action taken, and the resulting " +
+          "playback state.",
         inputSchema: {
           zoneId: z
             .string()
@@ -353,22 +314,16 @@ export class RoonMcpServer {
                 "ROON_DEFAULT_ZONE or fall back automatically (see now_playing).",
             ),
           action: z
-            .enum(["pause", "resume", "next", "previous", "stop"])
+            .enum(TRANSPORT_ACTIONS)
             .describe(
               "Transport verb to run: 'pause' to stop playback, 'resume' to " +
                 "restart it, 'next' to skip to the next track, 'previous' to " +
-                "go back, 'stop' to release the audio device.",
+                "go back, 'stop' to release the audio device, 'playpause' to " +
+                "toggle between playing and paused.",
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.control(args.zoneId, args.action);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.control(args.zoneId, args.action)),
     );
 
     this.server.registerTool(
@@ -387,9 +342,8 @@ export class RoonMcpServer {
           "skipped rather than guessed at. zoneId is optional and resolves " +
           "like now_playing. NOTE on relative changes (\"louder\" / \"softer\" " +
           "without a number): this tool is absolute — read the current " +
-          "state with now_playing isn't enough on its own (volume isn't " +
-          "exposed there), so for relative changes, ask the user for a " +
-          "target percent or apply a reasonable default delta.",
+          "`volumePercent` from now_playing, add/subtract a delta, and pass " +
+          "the result as `level`.",
         inputSchema: {
           zoneId: z
             .string()
@@ -409,14 +363,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.setVolume(args.zoneId, args.level);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.setVolume(args.zoneId, args.level)),
     );
 
     this.server.registerTool(
@@ -443,14 +390,312 @@ export class RoonMcpServer {
             .describe("`true` to mute, `false` to unmute."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.mute(args.zoneId, args.muted);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
+      handle((args) => this.transport.mute(args.zoneId, args.muted)),
+    );
+
+    this.server.registerTool(
+      "seek",
+      {
+        title: "Seek within the current track in a Roon zone",
+        description:
+          "Use this when the user wants to jump to a position in the current " +
+          "track or skip forward/back by a few seconds (e.g. \"skip 30 " +
+          "seconds\", \"jump to 1:30\", \"go back 10 seconds\", \"seek to the " +
+          "beginning\"). In absolute mode (default) `seconds` is the target " +
+          "position (0 = start); in relative mode it is a forward (positive) " +
+          "or backward (negative) delta. Refuses if the zone reports seek is " +
+          "not allowed. zoneId is optional and resolves like now_playing.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          seconds: z
+            .number()
+            .describe(
+              "Target position in seconds (absolute mode, 0 = start) or a " +
+                "delta in seconds (relative mode; negative skips backward).",
+            ),
+          mode: z
+            .enum(["absolute", "relative"])
+            .optional()
+            .describe(
+              "'absolute' (default) seeks to `seconds`; 'relative' moves by " +
+                "`seconds` from the current position.",
+            ),
+        },
       },
+      handle(async (args) => {
+        const result = await this.transport.seek(
+          args.zoneId,
+          args.seconds,
+          args.mode ?? "absolute",
+        );
+        return result;
+      }),
+    );
+
+    this.server.registerTool(
+      "set_loop",
+      {
+        title: "Set the loop/repeat mode for a Roon zone",
+        description:
+          "Use this when the user wants to repeat or loop playback (e.g. " +
+          "\"repeat\", \"loop this track\", \"repeat all\", \"turn off " +
+          "repeat\", \"loop the album\"). Sets the zone's loop/repeat mode: " +
+          "'off' (no repeat), 'all' (repeat the queue/album), or 'one' " +
+          "(repeat the current track). zoneId is optional and resolves like " +
+          "now_playing. Refuses on Cores whose transport doesn't expose " +
+          "change_settings.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          mode: z
+            .enum(["off", "all", "one"])
+            .describe(
+              "'off' disables repeat, 'all' repeats the queue, 'one' repeats " +
+                "the current track.",
+            ),
+        },
+      },
+      handle((args) => this.transport.setLoop(args.zoneId, args.mode)),
+    );
+
+    this.server.registerTool(
+      "pause_all",
+      {
+        title: "Pause playback in every Roon zone",
+        description:
+          "Use this when everything should stop at once (e.g. \"pause " +
+          "everything\"). Pauses every zone on the Core in one call. Resume " +
+          "per zone with control_playback.",
+        inputSchema: {},
+      },
+      handle(() => this.transport.pauseAll()),
+    );
+
+    this.server.registerTool(
+      "mute_all",
+      {
+        title: "Mute or unmute every Roon zone",
+        description:
+          "Use this to mute/unmute every room at once (e.g. \"mute the whole " +
+          "house\"). Mutes (muted:true) or unmutes every mutable output on the " +
+          "Core. Playback keeps running silently — use pause_all to actually " +
+          "stop it.",
+        inputSchema: {
+          muted: z.boolean().describe("`true` to mute every zone, `false` to unmute."),
+        },
+      },
+      handle((args) => this.transport.muteAll(args.muted)),
+    );
+
+    this.server.registerTool(
+      "set_auto_radio",
+      {
+        title: "Turn Roon Radio on or off for a zone",
+        description:
+          "Use this when music should keep going (or stop) after the queue " +
+          "ends (e.g. \"turn on Roon Radio\", \"stop after this album — no " +
+          "radio\"). Sets the zone's Roon Radio flag: on = Roon appends " +
+          "similar tracks when the queue runs out; off = playback stops at " +
+          "queue end. zoneId is optional and resolves like now_playing.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          enabled: z.boolean().describe("`true` to enable Roon Radio, `false` to disable."),
+        },
+      },
+      handle((args) => this.transport.setAutoRadio(args.zoneId, args.enabled)),
+    );
+
+    this.server.registerTool(
+      "get_queue",
+      {
+        title: "Read a Roon zone's upcoming play queue",
+        description:
+          "Use this when the user asks what's coming up, or before editing play " +
+          "order (e.g. \"what's next?\", \"skip ahead to the Radiohead track\"). " +
+          "Returns the queue in play order: 1-based positions, title/artist/" +
+          "album, track length, and a `queueItemId` per entry for " +
+          "play_queue_item. The first entry is the currently-playing track. " +
+          "queueItemIds go stale when the queue changes; re-read before jumping. " +
+          "zoneId optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(500)
+            .optional()
+            .describe("Max queue entries to return (default 25)."),
+        },
+      },
+      handle((args) => this.transport.getQueue(args.zoneId, args.limit ?? 25)),
+    );
+
+    this.server.registerTool(
+      "play_queue_item",
+      {
+        title: "Jump playback to an item in the zone's queue",
+        description:
+          "Use this to skip ahead (or back) to a specific queued track without " +
+          "rebuilding the queue (e.g. \"play track 5 from the queue\"). Starts " +
+          "playback from the given queue item; the rest of the queue continues " +
+          "from there. Pass a `queueItemId` from a FRESH get_queue read — ids " +
+          "go stale when the queue changes, so re-read on failure. zoneId " +
+          "optional (resolves like now_playing).",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Zone/output id or name substring. Omit to use ROON_DEFAULT_ZONE " +
+                "or fall back automatically.",
+            ),
+          queueItemId: z
+            .number()
+            .int()
+            .describe("Queue item id from a recent get_queue result."),
+        },
+      },
+      handle((args) => this.transport.playFromHere(args.zoneId, args.queueItemId)),
+    );
+
+    this.server.registerTool(
+      "transfer_zone",
+      {
+        title: "Move playback from one Roon zone to another",
+        description:
+          "Use this when the music should follow the user to another room " +
+          "(e.g. \"move this to the bedroom\"). Moves the playing queue — " +
+          "current track, position, and upcoming items — to the destination " +
+          "zone; the source stops. toZoneId is required (id or name " +
+          "substring); fromZoneId is optional and resolves like now_playing " +
+          "(typically the currently-playing zone).",
+        inputSchema: {
+          fromZoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Source zone id or name substring. Omit to use " +
+                "ROON_DEFAULT_ZONE or fall back automatically.",
+            ),
+          toZoneId: z
+            .string()
+            .min(1)
+            .describe("Destination zone id or name substring from list_zones."),
+        },
+      },
+      handle((args) => this.transport.transferZone(args.fromZoneId, args.toZoneId)),
+    );
+
+    this.server.registerTool(
+      "group_outputs",
+      {
+        title: "Group Roon outputs into one synchronized zone",
+        description:
+          "Use this when the user wants the same music in several rooms at " +
+          "once (e.g. \"group the kitchen and living room\", \"play this " +
+          "everywhere\"). Joins the outputs into one synchronized zone. " +
+          "Entries are zone/output ids or name substrings; a zone name " +
+          "expands to all its outputs. ORDER MATTERS: the FIRST entry's queue " +
+          "keeps playing — put the already-playing room first. Roon rejects " +
+          "hardware-incompatible groupings. Undo with ungroup_outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(2)
+            .describe(
+              "Two or more zone/output ids or name substrings. The first " +
+                "entry's queue survives the grouping.",
+            ),
+        },
+      },
+      handle((args) => this.transport.groupOutputs(args.zonesOrOutputs, "group")),
+    );
+
+    this.server.registerTool(
+      "library_export",
+      {
+        title: "Export the Roon library album catalog to a JSON file",
+        description:
+          "Use this to snapshot the user's library albums (the deliberately-added " +
+          "collection, not listening history) as a JSON file — e.g. to hand to a " +
+          "downstream recommendation or diffing tool. Walks Library → Albums and " +
+          "writes `path` atomically (parents created); an existing file is only " +
+          "replaced if it is an earlier snapshot, anything else is refused " +
+          "with EXPORT_PATH_REFUSED. Can take tens " +
+          "of seconds on a large library, and holds the browse session for the " +
+          "whole walk, so search_music, get_tracks_for and play_now wait behind " +
+          "it — don't run it mid-listening-session. IMPORTANT: the album data goes to the " +
+          "FILE, never returned here — the result is only { status, path, " +
+          "albumCount, durationMs, expectedCount? } plus a `warning` when the " +
+          "collected count doesn't match what Roon reported.",
+        inputSchema: {
+          path: z
+            .string()
+            .min(1)
+            .refine((p) => isAbsolute(p), { message: "path must be absolute" })
+            .describe(
+              "Absolute path to write the snapshot JSON to (parents created). " +
+                "An existing file is only replaced if it is an earlier snapshot.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Optional cap on albums exported (for testing); omit for the full library."),
+        },
+      },
+      handle((args) => this.libraryExport.export(args)),
+    );
+
+    this.server.registerTool(
+      "ungroup_outputs",
+      {
+        title: "Split grouped Roon outputs back into separate zones",
+        description:
+          "Use this to stop multi-room playback (e.g. \"ungroup the " +
+          "speakers\", \"stop playing in the kitchen but keep the living " +
+          "room\"). Detaches the named outputs from their synchronized group; " +
+          "each becomes its own zone again. Entries are zone/output ids or " +
+          "name substrings; a zone name expands to all its outputs.",
+        inputSchema: {
+          zonesOrOutputs: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe("Zone/output ids or name substrings to detach from their group."),
+        },
+      },
+      handle((args) => this.transport.groupOutputs(args.zonesOrOutputs, "ungroup")),
     );
   }
 
@@ -466,6 +711,18 @@ export class RoonMcpServer {
   }
 }
 
+/** Wrap a tool implementation: its result becomes structured content, and any
+ * throw becomes a tool error. */
+function handle<A>(run: (args: A) => Promise<unknown>) {
+  return async (args: A) => {
+    try {
+      return structured(await run(args));
+    } catch (err) {
+      return toToolError(err);
+    }
+  };
+}
+
 function structured(payload: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
@@ -473,8 +730,12 @@ function structured(payload: unknown) {
   };
 }
 
-function toToolError(err: unknown) {
-  const code = err instanceof RoonMcpError ? err.code : "BROWSE_FAILED";
+export function toToolError(err: unknown) {
+  // Unexpected (non-RoonMcpError) errors are genuine internal failures — a bug
+  // or an unhandled Roon transport error — not browse failures. Label them
+  // INTERNAL_ERROR so the agent doesn't misread them as retryable browse
+  // problems (issue #13).
+  const code = err instanceof RoonMcpError ? err.code : "INTERNAL_ERROR";
   const message = err instanceof Error ? err.message : String(err);
   return {
     isError: true as const,

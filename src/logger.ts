@@ -82,3 +82,36 @@ function format(record: Record<string, unknown>): string {
   }
   return `[roon-call] ${JSON.stringify(clean)}\n`;
 }
+
+/**
+ * Route every console output method (including `error`) to `sink` — stderr by
+ * default. On a stdio MCP server stdout is reserved for the JSON-RPC stream, so
+ * any library (node-roon-api) logging via `console.*` must not reach it.
+ * `console.error` was previously left on its default, which happens to write to
+ * stderr too, but routing it explicitly keeps a single chokepoint and uniform
+ * formatting (issue #15). Returns a restore function so tests can reset it.
+ */
+export function redirectConsoleToStderr(
+  sink: (line: string) => void = (line) => void process.stderr.write(line),
+): () => void {
+  const original = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    debug: console.debug.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
+  const write = (...args: unknown[]) => sink(`${args.map(String).join(" ")}\n`);
+  console.log = write;
+  console.info = write;
+  console.debug = write;
+  console.warn = write;
+  console.error = write;
+  return () => {
+    console.log = original.log;
+    console.info = original.info;
+    console.debug = original.debug;
+    console.warn = original.warn;
+    console.error = original.error;
+  };
+}

@@ -1,14 +1,17 @@
 // Public domain types shared across services and MCP tool boundaries.
 // Kept aligned with the implementation plan's TypeScript interfaces.
 
-export type MusicItemType =
-  | "artist"
-  | "album"
-  | "track"
-  | "genre"
-  | "playlist"
-  | "radio"
-  | "unknown";
+export const MUSIC_ITEM_TYPES = [
+  "artist",
+  "album",
+  "track",
+  "genre",
+  "playlist",
+  "radio",
+  "unknown",
+] as const;
+
+export type MusicItemType = (typeof MUSIC_ITEM_TYPES)[number];
 
 export type ZoneState = "playing" | "paused" | "stopped" | "loading" | "unknown";
 
@@ -105,29 +108,34 @@ export interface EnqueueAndPlayOutput extends PlaybackResult {
   requested: number;
 }
 
-/** Verb for the `control_playback` tool. `resume` maps to Roon's `play`. */
-export type TransportAction = "pause" | "resume" | "next" | "previous" | "stop";
+/** Verbs for the `control_playback` tool. `resume` maps to Roon's `play`. */
+export const TRANSPORT_ACTIONS = [
+  "pause",
+  "resume",
+  "next",
+  "previous",
+  "stop",
+  "playpause",
+] as const;
 
-export interface ControlPlaybackInput {
-  /** Zone or output id from `list_zones`; resolves like `play_now` when omitted. */
-  zoneId?: string;
-  action: TransportAction;
+export type TransportAction = (typeof TRANSPORT_ACTIONS)[number];
+
+export interface SeekResult {
+  ok: true;
+  zoneId: string;
+  /** The mode actually applied. */
+  mode: "absolute" | "relative";
+  /** The requested position/delta (echoed for caller convenience). */
+  seconds: number;
 }
 
-export interface SetVolumeInput {
-  zoneId?: string;
-  /**
-   * Target volume in percent (0 = silent, 100 = max). The server rescales
-   * to each output's native range, so a single value works across mixed
-   * devices in a grouped zone.
-   */
-  level: number;
-}
+/** Loop/repeat mode for the `set_loop` tool. */
+export type LoopMode = "off" | "all" | "one";
 
-export interface MuteInput {
-  zoneId?: string;
-  /** `true` to mute, `false` to unmute. */
-  muted: boolean;
+export interface SetLoopResult {
+  ok: true;
+  zoneId: string;
+  mode: LoopMode;
 }
 
 /**
@@ -145,19 +153,54 @@ export interface NowPlayingInfo {
   imageKey?: string;
   lengthSec?: number;
   seekPositionSec?: number;
+  /**
+   * Current volume of the zone's first numeric-range output as a 0–100
+   * percent (the inverse of `set_volume`'s scaling). Undefined when no output
+   * exposes a numeric range (e.g. IR blasters). Exposed so the agent can serve
+   * relative "louder"/"softer" requests (issue #10).
+   */
+  volumePercent?: number;
+  /** True when any output in the zone is muted. */
+  isMuted?: boolean;
+}
+
+/** Input for a library album-catalog export. */
+export interface LibraryExportInput {
+  /**
+   * Absolute path to write the snapshot JSON to; parents created. An existing
+   * file is only replaced when it is an earlier library_export snapshot.
+   */
+  path: string;
+  /** Optional cap on albums exported (for testing); omit/0 = unlimited. */
+  limit?: number;
+}
+
+/** Result of a library export. The albums go to the file, not in here. */
+export interface LibraryExportResult {
+  status: "ok";
+  /** Path the snapshot was written to (echoes the input). */
+  path: string;
+  albumCount: number;
+  /** Wall-clock time of the walk + write. */
+  durationMs: number;
+  /** Album count Roon reported in the list header, when available. */
+  expectedCount?: number;
+  /** Set when the collected count doesn't match what Roon reported. */
+  warning?: string;
 }
 
 export type RoonMcpErrorCode =
   | "NO_CORE_PAIRED"
+  | "CORE_PAIRING_HELD"
   | "ZONE_NOT_FOUND"
   | "ZONE_AMBIGUOUS"
   | "BROWSE_FAILED"
   | "INVALID_ITEM_KEY"
-  | "NO_SEARCH_RESULTS"
   | "NO_PLAYABLE_ITEMS"
   | "NO_PLAY_ACTION"
   | "ACTION_FAILED"
-  | "PARTIAL_QUEUE";
+  | "EXPORT_PATH_REFUSED"
+  | "INTERNAL_ERROR";
 
 export class RoonMcpError extends Error {
   constructor(

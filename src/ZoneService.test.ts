@@ -106,6 +106,26 @@ test("resolveTarget rejects an unknown explicit id with ZONE_NOT_FOUND", async (
   );
 });
 
+test("resolveTarget falls back to display-name substring for an explicit target", async () => {
+  const svc = serviceWith([
+    zone({ zone_id: "z1", display_name: "MacMini System" }),
+    zone({ zone_id: "z2", display_name: "NAD Living room" }),
+  ]);
+  const out = await svc.resolveTarget("living");
+  assert.equal(out.targetId, "z2");
+});
+
+test("resolveTarget reports ZONE_AMBIGUOUS when a name substring matches several zones", async () => {
+  const svc = serviceWith([
+    zone({ zone_id: "z1", display_name: "Office Desk" }),
+    zone({ zone_id: "z2", display_name: "Office Shelf" }),
+  ]);
+  await assert.rejects(
+    svc.resolveTarget("office"),
+    (e) => e instanceof RoonMcpError && e.code === "ZONE_AMBIGUOUS",
+  );
+});
+
 test("resolveTarget uses the configured default zone (by name) when none is passed", async () => {
   const svc = serviceWith(
     [zone({ zone_id: "z1", display_name: "Kitchen" }), zone({ zone_id: "z2", display_name: "Office" })],
