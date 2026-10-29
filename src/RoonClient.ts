@@ -90,8 +90,12 @@ export class RoonClient {
 
   private readonly lockPath: string;
   private lockHandle: InstanceLockHandle | undefined;
-  /** Set when another live process already holds {@link lockPath}. */
-  private lockConflict: { ownerPid: number; ownerStartedAt: string } | undefined;
+  /**
+   * Set when another live process already holds {@link lockPath}. The owner
+   * fields are absent when the lock is churning between contending instances
+   * and no stable owner could be read (see {@link LockHeldByOther}).
+   */
+  private lockConflict: { ownerPid?: number; ownerStartedAt?: string } | undefined;
 
   /** Timestamps of recent core_paired/core_unpaired transitions, for thrash detection. */
   private pairingTransitions: number[] = [];
@@ -137,22 +141,54 @@ export class RoonClient {
    * discovery (or direct connect). When another live process already holds
    * the lock, discovery is skipped entirely — starting it would just steal
    * the pairing slot back and forth (issue #40) — and every call surfaces a
-   * `CORE_PAIRING_HELD` error naming the owning pid instead.
+   * `CORE_PAIRING_HELD` error naming the owning pid instead, re-probing the
+   * lock first so this instance recovers once the holder exits (issue #48).
    */
   start(): void {
+    if (!this.tryAcquireLock()) return;
+    this.beginDiscovery();
+  }
+
+  /**
+   * Try to take the single-owner lock. On conflict, records (or refreshes)
+   * the owning pid, reports it via the extension status, and rejects pending
+   * waiters — but logs/reports only when the recorded owner actually changed,
+   * so the per-call re-probe of a blocked instance doesn't spam a line per
+   * tool call. Returns whether the lock is now held by this process.
+   */
+  private tryAcquireLock(): boolean {
     const lock = acquireInstanceLock(this.lockPath, this.log);
     if (!lock.acquired) {
+      const sameOwner =
+        this.lockConflict !== undefined &&
+        this.lockConflict.ownerPid === lock.ownerPid &&
+        this.lockConflict.ownerStartedAt === lock.ownerStartedAt;
       this.lockConflict = { ownerPid: lock.ownerPid, ownerStartedAt: lock.ownerStartedAt };
-      this.log(
-        `another roon-mcp instance (pid ${lock.ownerPid}, started ${lock.ownerStartedAt}) ` +
-          `already holds the Core pairing lock at ${this.lockPath}; not starting discovery`,
-      );
-      this.status.set_status(`Blocked: pid ${lock.ownerPid} holds the Core pairing lock`, true);
-      this.rejectWaiters(this.lockConflictError());
-      return;
+      if (!sameOwner) {
+        this.log(
+          lock.ownerPid !== undefined
+            ? `another roon-mcp instance (pid ${lock.ownerPid}, started ${lock.ownerStartedAt}) ` +
+                `already holds the Core pairing lock at ${this.lockPath}; not starting discovery`
+            : `the Core pairing lock at ${this.lockPath} is churning between several ` +
+                "contending instances; not starting discovery",
+        );
+        this.status.set_status(
+          lock.ownerPid !== undefined
+            ? `Blocked: pid ${lock.ownerPid} holds the Core pairing lock`
+            : "Blocked: several instances are contending for the Core pairing lock",
+          true,
+        );
+        this.rejectWaiters(this.lockConflictError());
+      }
+      return false;
     }
     this.lockHandle = lock.handle;
+    this.lockConflict = undefined;
+    return true;
+  }
 
+  /** The half of startup that owns the pairing slot: services + discovery. */
+  private beginDiscovery(): void {
     this.roon.init_services({
       required_services: [RoonApiTransport, RoonApiBrowse],
       provided_services: [this.status],
@@ -166,16 +202,38 @@ export class RoonClient {
     }
   }
 
+  /**
+   * Whether a call must fail with `CORE_PAIRING_HELD` right now. While in the
+   * blocked state this re-probes the lock first: the holder may have exited
+   * since the last check, and `acquireInstanceLock` treats a lock from a dead
+   * pid as stale and takes it over. Without the re-probe, a blocked instance
+   * kept reporting the dead holder forever and had to be restarted by hand
+   * (issue #48). On takeover, runs the discovery half of `start()` that the
+   * original lock conflict skipped, and the call proceeds like any other.
+   */
+  private blockedByLockConflict(): boolean {
+    if (!this.lockConflict) return false;
+    if (this.stopped || !this.tryAcquireLock()) return true;
+    this.log("the previous lock holder has exited; this instance now owns Core pairing");
+    this.beginDiscovery();
+    return false;
+  }
+
   /** Builds the error surfaced whenever another process holds the lock. */
   private lockConflictError(): RoonMcpError {
     const { ownerPid, ownerStartedAt } = this.lockConflict!;
+    const holder =
+      ownerPid !== undefined
+        ? `Another roon-mcp instance (pid ${ownerPid}, started ${ownerStartedAt}) already ` +
+          "holds the Roon Core pairing lock"
+        : "Several roon-mcp instances are contending for the Roon Core pairing lock";
     return new RoonMcpError(
       "CORE_PAIRING_HELD",
-      `Another roon-mcp instance (pid ${ownerPid}, started ${ownerStartedAt}) already holds ` +
-        "the Roon Core pairing lock — Roon pairs only one instance of this extension at a " +
-        'time. Stop that instance (e.g. `pkill -f roon-mcp`) or wait for it to exit, then ' +
-        "retry. Nothing needs enabling under Roon → Settings → Extensions; the extension is " +
-        "already paired, just not to this process.",
+      `${holder} — Roon pairs only one instance of this extension at a time. Stop the ` +
+        "other instance(s) (e.g. `pkill -f roon-mcp`) or wait for them to exit, then " +
+        "retry: this instance re-checks the lock on every call and takes over automatically " +
+        "once the holder is gone. Nothing needs enabling under Roon → Settings → Extensions; " +
+        "the extension is already paired, just not to this process.",
     );
   }
 
@@ -223,7 +281,9 @@ export class RoonClient {
     if (this.core) return Promise.resolve(this.core);
     // Fail fast instead of burning the full timeout on a wait that can never
     // resolve — no discovery is running while another instance owns the lock.
-    if (this.lockConflict) return Promise.reject(this.lockConflictError());
+    // blockedByLockConflict re-probes first, so once the holder has exited
+    // this call recovers the lock and waits for pairing like any other.
+    if (this.blockedByLockConflict()) return Promise.reject(this.lockConflictError());
 
     return new Promise<RoonCore>((resolve, reject) => {
       // Wrap resolve/reject so the timer is cleared whichever path fires first:
@@ -282,7 +342,7 @@ export class RoonClient {
 
   /** Transport service of the currently paired Core. Throws if unpaired. */
   getTransport(): RoonTransportService {
-    if (this.lockConflict) throw this.lockConflictError();
+    if (this.blockedByLockConflict()) throw this.lockConflictError();
     if (!this.core) {
       throw new RoonMcpError("NO_CORE_PAIRED", "No Roon Core is currently paired.");
     }
@@ -291,7 +351,7 @@ export class RoonClient {
 
   /** Browse service of the currently paired Core. Throws if unpaired. */
   getBrowse(): RoonBrowseService {
-    if (this.lockConflict) throw this.lockConflictError();
+    if (this.blockedByLockConflict()) throw this.lockConflictError();
     if (!this.core) {
       throw new RoonMcpError("NO_CORE_PAIRED", "No Roon Core is currently paired.");
     }
