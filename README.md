@@ -110,6 +110,12 @@ claims a lock file (`instance.lock`, next to `config.json`) and every other inst
 fails fast with a `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
 flapping between paired/unpaired.
 
+A lock whose owning process is no longer alive is treated as stale and taken over —
+both at startup and by an already-running blocked instance, which re-checks the lock
+on every call. So when the holder exits (cleanly or via `kill -9`), the next call to
+any other instance acquires the lock, starts discovery, and pairs; nothing needs
+restarting.
+
 MCP clients don't always reap server processes when a session ends, so orphaned
 `roon-mcp` instances can pile up and hold the lock long after their terminal is gone. If
 you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
@@ -118,7 +124,8 @@ you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
 pkill -f roon-mcp
 ```
 
-The next instance you start will then acquire the lock normally.
+Blocked instances that are still running recover on their own next call, and the next
+instance you start acquires the lock normally.
 
 ## Assumptions
 
