@@ -46,6 +46,21 @@ function cleanGroupTitle(title: string): string {
   return title.replace(/\s*\(\d+\)\s*$/, "").trim();
 }
 
+/**
+ * How many of `limit`'s slots to request from streaming: whatever the library
+ * share leaves free, but at least a reserved ceil(limit/2) — an explicit
+ * `includeStreaming` must never be silently starved by a full page of library
+ * results (issue #8). Streaming exists to rescue dead ends (a "0 Albums"
+ * artist, a genre outside the library), and a fuzzy query fills `limit` with
+ * library candidates exactly when that rescue matters. Callers backfill any
+ * unused streaming slots from the library tail, so the combined total still
+ * never exceeds `limit`.
+ */
+function streamingBudget(limit: number, libraryCount: number): number {
+  const reserve = Math.ceil(limit / 2);
+  return limit - Math.min(libraryCount, limit - reserve);
+}
+
 /** Turns a text query into ranked browse candidates via the search hierarchy. */
 export class SearchService {
   constructor(
@@ -75,17 +90,32 @@ export class SearchService {
     // library results first, streaming tracks appended with sourceGroup
     // "Streaming". See collectStreamingArtistTracks.
     if (input.type === "artist" && input.includeStreaming) {
-      // Budget streaming against the overall limit so the combined result never
-      // exceeds `limit` (issue #8): library candidates first, then as many
-      // streaming tracks as the remaining budget allows.
-      const budget = Math.max(0, limit - library.candidates.length);
+      // Budget streaming against the overall limit so the combined result
+      // never exceeds `limit`, with a reserved streaming share so the library
+      // page can't starve the rescue this fallback exists for (issue #8).
+      const budget = streamingBudget(limit, library.candidates.length);
       const streaming = budget > 0 ? await this.collectStreamingArtistTracks(input.query, budget) : [];
       if (streaming.length > 0) {
-        const candidates = [...library.candidates, ...streaming];
-        const message = library.message
-          ? `${library.message} Also showing ${streaming.length} streaming track(s).`
-          : `No library artist matched "${input.query}"; showing streaming tracks.`;
-        return { query: input.query, candidates, broadened: library.broadened, message };
+        // Library keeps its ranked head; only the fuzzy tail makes room.
+        const kept = library.candidates.slice(0, limit - streaming.length);
+        const trimmed = library.candidates.length - kept.length;
+        const also = `Also showing ${streaming.length} streaming track(s).`;
+        let message =
+          kept.length === 0
+            ? `No library artist matched "${input.query}"; showing streaming tracks.`
+            : library.message
+              ? `${library.message} ${also}`
+              : also;
+        if (trimmed > 0) {
+          message += ` Trimmed ${trimmed} library candidate(s) to stay within the limit.`;
+        }
+        return { query: input.query, candidates: [...kept, ...streaming], broadened: library.broadened, message };
+      }
+      // Streaming was explicitly requested but found nothing: say so where the
+      // library side already flagged a dead end, instead of leaving the agent
+      // to wonder whether the budget ate the streaming results.
+      if (library.message) {
+        return { ...library, message: `${library.message} No streaming tracks were found.` };
       }
     }
 
@@ -101,16 +131,19 @@ export class SearchService {
 
     let streamingTracks: MusicCandidate[] = [];
     if (includeStreaming) {
-      // Budget streaming against the overall limit so the combined result
-      // never exceeds `limit` (issue #8): library genres first, then as many
-      // streaming tracks as the remaining budget allows.
-      const budget = Math.max(0, limit - libraryGenres.length);
+      // Same budget-with-reserve as the artist path (issue #8): the combined
+      // result never exceeds `limit`, and an explicit includeStreaming is
+      // never starved by a full page of library genres.
+      const budget = streamingBudget(limit, libraryGenres.length);
       if (budget > 0) {
         streamingTracks = await this.collectStreamingGenreTracks(query, budget);
       }
     }
 
-    const candidates = [...libraryGenres, ...streamingTracks];
+    // Library keeps its ranked head; unused streaming budget backfills tail genres.
+    const keptGenres = libraryGenres.slice(0, limit - streamingTracks.length);
+    const trimmed = libraryGenres.length - keptGenres.length;
+    const candidates = [...keptGenres, ...streamingTracks];
 
     let message: string | undefined;
     if (candidates.length === 0) {
@@ -120,6 +153,10 @@ export class SearchService {
     } else if ((libraryGenres[0]?.score ?? 0) < 1) {
       const suffix = includeStreaming ? "; also showing streaming tracks" : "";
       message = `No genre exactly named "${query}"; showing nearest genres${suffix}.`;
+    }
+    if (trimmed > 0) {
+      const note = `Trimmed ${trimmed} library genre(s) to stay within the limit.`;
+      message = message ? `${message} ${note}` : note;
     }
     return { query, candidates, broadened: false, message };
   }
@@ -280,7 +317,11 @@ export class SearchService {
     // searchMusic picks this up.
     if (input.type === "artist" && /^\s*0\s+albums?\s*$/i.test(ranked[0]?.subtitle ?? "")) {
       const name = ranked[0]!.title;
-      const hint = `Artist "${name}" has no library albums; pass includeStreaming:true to sample streaming tracks.`;
+      // Don't advise a flag the caller already passed; searchMusic appends
+      // what the streaming side actually found.
+      const hint = input.includeStreaming
+        ? `Artist "${name}" has no library albums.`
+        : `Artist "${name}" has no library albums; pass includeStreaming:true to sample streaming tracks.`;
       message = message ? `${message} ${hint}` : hint;
     }
 

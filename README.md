@@ -94,6 +94,7 @@ npm install -g roon-mcp
 
 - **Genre search** fuzzy-matches what you type — "psychedelic trance" will find the right genre even if the name isn't exact. By default results come from your library.
 - **`includeStreaming: true`** (on `type:"genre"` or `type:"artist"`) extends the search to your streaming service, so you can play artists or genres that aren't in your local collection.
+- **`limit` caps the combined result.** Library results come first; streaming tracks fill the remaining slots. When library results alone would fill the limit, up to half of it is reserved for streaming (trimming the lowest-ranked library tail, noted in `message`) so an explicit `includeStreaming` always surfaces streaming content when it exists.
 
 ### Notes
 
