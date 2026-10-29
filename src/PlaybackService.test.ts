@@ -563,3 +563,67 @@ test("play_now still reports the previous track when no Changed event arrives", 
   const out = await svc.playNow({ zoneId: "z1", itemKey: loc("album") });
   assert.equal(out.nowPlaying, "Some Track");
 });
+
+test("append queues every item with Add to Queue, never Play Now", async () => {
+  const { svc, browse } = build(
+    {
+      t1: [action("Play Now", "p1"), action("Add to Queue", "q1")],
+      t2: [action("Play Now", "p2"), action("Queue", "q2")],
+    },
+    ["p1", "q1", "p2", "q2"],
+  );
+
+  const out = await svc.enqueueAppend({ zoneId: "z1", itemKeys: [loc("t1"), loc("t2")] });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 2);
+  assert.equal(out.requested, 2);
+  assert.deepEqual(out.skipped, []);
+  // Both appended, in order — the current track is never replaced.
+  assert.deepEqual(
+    browse.invocations.map((i) => i.itemKey),
+    ["q1", "q2"],
+  );
+});
+
+test("append skips an item that cannot be queued and keeps going", async () => {
+  const { svc, browse } = build(
+    {
+      t1: [action("Add to Queue", "q1")],
+      playOnly: [action("Play Now", "p2")],
+      t3: [action("Queue", "q3")],
+    },
+    ["q1", "p2", "q3"],
+  );
+
+  const out = await svc.enqueueAppend({
+    zoneId: "z1",
+    itemKeys: [loc("t1"), loc("playOnly"), loc("t3")],
+  });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.queued, 2);
+  assert.equal(out.skipped.length, 1);
+  assert.equal(out.skipped[0]?.itemKey, loc("playOnly"));
+  // The play-only item is skipped, not played: nothing interrupts the queue.
+  assert.deepEqual(
+    browse.invocations.map((i) => i.itemKey),
+    ["q1", "q3"],
+  );
+});
+
+test("append reports ok:false when nothing could be queued", async () => {
+  const { svc } = build({ bad: { message: "Unavailable." } }, []);
+  const out = await svc.enqueueAppend({ zoneId: "z1", itemKeys: [loc("bad")] });
+  assert.equal(out.ok, false);
+  assert.equal(out.queued, 0);
+  assert.equal(out.skipped.length, 1);
+});
+
+test("append with no item keys is a no-op", async () => {
+  const { svc, browse } = build({}, []);
+  const out = await svc.enqueueAppend({ zoneId: "z1", itemKeys: [] });
+  assert.equal(out.ok, false);
+  assert.equal(out.requested, 0);
+  assert.deepEqual(browse.invocations, []);
+});

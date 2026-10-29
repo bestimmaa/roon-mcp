@@ -79,6 +79,7 @@ npm install -g roon-mcp
 | `get_tracks_for({ itemKey, limit? })` | Expand an artist/album/genre/playlist candidate into concrete playable tracks. |
 | `play_now({ zoneId?, itemKey, shuffle?, addToQueue? })` | Play or queue one search candidate. By default replaces the queue and starts immediately. Pass `addToQueue: true` to append to the existing queue instead. `zoneId` optional (defaults as above). |
 | `enqueue_and_play({ zoneId?, itemKeys, shuffle? })` | Build an ad-hoc queue from curated item keys and start it (**replaces** the zone's queue); reports queued/skipped. |
+| `enqueue_append({ zoneId?, itemKeys })` | Append curated item keys, in order, to the **end** of the zone's current queue without interrupting playback; reports queued/skipped. |
 | `now_playing({ zoneId? })` | Snapshot of the zone's current track — state, title, artist, album, seek position. `title`/`artist`/`album` are undefined when nothing is playing. |
 | `control_playback({ zoneId?, action })` | Run a transport verb: `pause` / `resume` / `next` / `previous` / `stop` / `playpause` (toggle play/pause). |
 | `seek({ zoneId?, seconds, mode? })` | Seek within the current track. `mode:"absolute"` (default) seeks to `seconds` (0 = start); `"relative"` moves by `seconds` (negative skips backward). |
@@ -135,14 +136,15 @@ instance you start acquires the lock normally.
   through Roon's Browse API, which routes to whatever streaming service you have set
   up in Roon (Tidal, Qobuz, etc.). Developed and tested against Tidal — other services
   should work but are untested. Results differ on a local-only Core.
-- **Queue: replace.** `enqueue_and_play` starts a fresh queue rather than adding to
-  whatever is already playing.
+- **Queue: replace or append.** `enqueue_and_play` starts a fresh queue;
+  `enqueue_append` (or `play_now` with `addToQueue` for a single item) adds to the
+  end of whatever is already playing.
 - **Curation is agent-side.** Dedupe / cap-per-artist / ordering / trimming stay in the
   agent; the server has no curation logic.
 
 There is no `save_playlist` tool: Roon exposes no official playlist-write service, so
 durable playlists are out of scope. Curated playback is delivered by `enqueue_and_play`
-(an ad-hoc, in-the-moment queue).
+/ `enqueue_append` (an ad-hoc, in-the-moment queue).
 
 ## Logging
 
