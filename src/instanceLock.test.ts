@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -58,6 +58,8 @@ test("acquireInstanceLock takes over a stale lock from a dead pid", () => {
     assert.equal(result.acquired, true);
     const contents = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(contents.pid, process.pid);
+    // The takeover's rename tombstone must not linger.
+    assert.deepEqual(readdirSync(dir), ["instance.lock"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

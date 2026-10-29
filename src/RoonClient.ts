@@ -148,18 +148,25 @@ export class RoonClient {
   /**
    * Try to take the single-owner lock. On conflict, records (or refreshes)
    * the owning pid, reports it via the extension status, and rejects pending
-   * waiters. Returns whether the lock is now held by this process.
+   * waiters — but logs/reports only when the recorded owner actually changed,
+   * so the per-call re-probe of a blocked instance doesn't spam a line per
+   * tool call. Returns whether the lock is now held by this process.
    */
   private tryAcquireLock(): boolean {
     const lock = acquireInstanceLock(this.lockPath, this.log);
     if (!lock.acquired) {
+      const sameOwner =
+        this.lockConflict?.ownerPid === lock.ownerPid &&
+        this.lockConflict?.ownerStartedAt === lock.ownerStartedAt;
       this.lockConflict = { ownerPid: lock.ownerPid, ownerStartedAt: lock.ownerStartedAt };
-      this.log(
-        `another roon-mcp instance (pid ${lock.ownerPid}, started ${lock.ownerStartedAt}) ` +
-          `already holds the Core pairing lock at ${this.lockPath}; not starting discovery`,
-      );
-      this.status.set_status(`Blocked: pid ${lock.ownerPid} holds the Core pairing lock`, true);
-      this.rejectWaiters(this.lockConflictError());
+      if (!sameOwner) {
+        this.log(
+          `another roon-mcp instance (pid ${lock.ownerPid}, started ${lock.ownerStartedAt}) ` +
+            `already holds the Core pairing lock at ${this.lockPath}; not starting discovery`,
+        );
+        this.status.set_status(`Blocked: pid ${lock.ownerPid} holds the Core pairing lock`, true);
+        this.rejectWaiters(this.lockConflictError());
+      }
       return false;
     }
     this.lockHandle = lock.handle;
