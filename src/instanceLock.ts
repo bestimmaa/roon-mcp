@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** Where a `RoonClient`'s single-owner lock lives, given its config path. */
@@ -126,19 +126,39 @@ export function acquireInstanceLock(
       // The tombstone name needs no uniqueness — the atomicity lives in the
       // rename of `path` itself, and a fixed name means a tombstone orphaned
       // by a crash is overwritten by the next takeover instead of lingering.
+      const tombstone = `${path}.stale`;
       try {
-        renameSync(path, `${path}.stale`);
+        renameSync(path, tombstone);
       } catch {
         // Lost the removal race — another process is mid-takeover. Re-read
         // and re-evaluate the new owner.
         continue;
       }
+      // The rename claimed whatever sat at `path` at that instant — which is
+      // not necessarily the stale file read above: a rival can complete its
+      // whole takeover between our read and our rename, leaving its fresh
+      // lock at `path` for our rename to steal (observed in an 8-process
+      // contention test). So inspect what was actually claimed: a live pid
+      // means we displaced a rival's fresh lock — put it back with link(),
+      // which unlike rename never overwrites, and back off to report them.
+      const claimed = readLock(tombstone);
+      const stoleFreshLock = claimed.state === "owned" && isProcessAlive(claimed.contents.pid);
+      if (stoleFreshLock) {
+        try {
+          linkSync(tombstone, path);
+        } catch {
+          // `path` was re-created in the instant it sat empty; nothing to
+          // restore onto. The displaced rival loses a race it can no longer
+          // win either way, and the re-read below reports the new owner.
+        }
+      }
       try {
-        unlinkSync(`${path}.stale`);
+        unlinkSync(tombstone);
       } catch {
         // Another takeover may have unlinked it first; a lingering tombstone
         // is harmless either way.
       }
+      if (stoleFreshLock) continue;
     }
 
     const contents: LockFileContents = { pid: process.pid, startedAt: new Date().toISOString() };
