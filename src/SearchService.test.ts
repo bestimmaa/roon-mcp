@@ -43,6 +43,10 @@ class FakeBrowse {
     // item_key → child rows, for drilling below the top groups (e.g. an album's
     // track list). Lets the streaming-genre path expand albums into tracks.
     private readonly drills: Record<string, BrowseItem[]> = {},
+    // Root nodes of the dedicated `genres` hierarchy (served on a bare
+    // pop_all, which only GenreService issues — flat search always sends
+    // `input` together with pop_all and takes the input branch above).
+    private readonly genreRoots: BrowseItem[] = [],
   ) {}
 
   browse(o: BrowseOptions, cb: (e: string | false, b: BrowseResultBody) => void): void {
@@ -66,7 +70,7 @@ class FakeBrowse {
       return cb(false, { action: "list" });
     }
     if (o.pop_all) {
-      this.stack = [];
+      this.stack = this.genreRoots.length > 0 ? [this.genreRoots] : [];
       return cb(false, { action: "list" });
     }
     if (o.item_key !== undefined) {
@@ -99,16 +103,18 @@ function buildService(
   groups: GroupDef[],
   opts?: FakeOpts,
   drills?: Record<string, BrowseItem[]>,
+  genreRoots?: BrowseItem[],
 ): SearchService {
-  return buildServiceWithFake(groups, opts, drills).svc;
+  return buildServiceWithFake(groups, opts, drills, genreRoots).svc;
 }
 
 function buildServiceWithFake(
   groups: GroupDef[],
   opts?: FakeOpts,
   drills?: Record<string, BrowseItem[]>,
+  genreRoots?: BrowseItem[],
 ): { svc: SearchService; fake: FakeBrowse } {
-  const fake = new FakeBrowse(groups, opts, drills);
+  const fake = new FakeBrowse(groups, opts, drills, genreRoots);
   const stub = { waitForCore: async () => undefined, getBrowse: () => fake } as unknown as RoonClient;
   const browse = new BrowseSessionManager(stub);
   const svc = new SearchService(browse, new GenreService(browse), new TrackExpansionService(browse));
@@ -272,7 +278,30 @@ test("includeStreaming for type:artist appends streaming tracks by that artist",
   assert.ok(streaming.every((c) => c.subtitle === "Helene Fischer"));
   assert.ok(streaming.every((c) => c.title !== "Other Artist Song"));
   assert.match(out.message ?? "", /no library albums/i);
-  assert.match(out.message ?? "", /includeStreaming/i);
+  // The flag is already set, so the message must not advise passing it; it
+  // reports what the streaming side found instead.
+  assert.doesNotMatch(out.message ?? "", /includeStreaming/i);
+  assert.match(out.message ?? "", /streaming track/i);
+});
+
+test("includeStreaming that finds nothing says so instead of advising the flag again", async () => {
+  const artists: GroupDef = {
+    title: "Artists",
+    key: "g:artists",
+    items: [{ ...item("Helene Fischer", "a:hf"), subtitle: "0 Albums" }],
+  };
+  // Track search surfaces only other artists, so the streaming filter keeps none.
+  const tracks: GroupDef = {
+    title: "Tracks",
+    key: "g:tracks",
+    items: [{ title: "Other Artist Song", item_key: "tk:3", subtitle: "Other Artist" }],
+  };
+  const svc = buildService([artists, tracks]);
+  const out = await svc.searchMusic({ query: "Helene Fischer", type: "artist", includeStreaming: true });
+
+  assert.match(out.message ?? "", /no library albums/i);
+  assert.match(out.message ?? "", /no streaming tracks were found/i);
+  assert.doesNotMatch(out.message ?? "", /includeStreaming/i);
 });
 
 test("an artist with 0 Albums surfaces a hint to pass includeStreaming", async () => {
@@ -292,7 +321,7 @@ test("an artist with 0 Albums surfaces a hint to pass includeStreaming", async (
   assert.match(out.message ?? "", /includeStreaming/i);
 });
 
-test("streaming-artist results are capped by limit", async () => {
+test("streaming-artist results are budgeted against limit so the total never exceeds it (issue #8)", async () => {
   const artists: GroupDef = {
     title: "Artists",
     key: "g:artists",
@@ -310,14 +339,96 @@ test("streaming-artist results are capped by limit", async () => {
   const svc = buildService([artists, tracks]);
   const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true, limit: 3 });
 
-  // 1 library artist + up to 3 streaming tracks. The streaming slice is
-  // capped independently of the library slice (the limit is a per-section
-  // cap on the streaming-track result, mirroring the genre path's per-album
-  // budget).
+  // 1 library artist + a streaming budget of (limit - 1) = 2 streaming tracks.
+  // The combined result must respect `limit`, not return up to 2×limit.
   const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
-  assert.ok(streaming.length <= 3, `expected ≤3 streaming candidates, got ${streaming.length}`);
+  assert.equal(streaming.length, 2);
+  assert.ok(out.candidates.length <= 3, `expected ≤3 total candidates, got ${out.candidates.length}`);
   assert.equal(out.candidates[0]?.sourceGroup, "Artists");
   assert.equal(out.candidates[0]?.title, "Tycho");
+});
+
+test("streaming-genre results are budgeted against limit so the total never exceeds it (issue #8)", async () => {
+  // No library genre tree → libraryGenres is empty, so the full `limit` is the
+  // streaming budget and the result must not exceed it.
+  const albums: GroupDef = {
+    title: "Albums",
+    key: "g:albums",
+    items: Array.from({ length: 5 }, (_, i) => leaf(`Album ${i}`, `al:${i}`)),
+  };
+  const drills: Record<string, BrowseItem[]> = {};
+  for (let i = 0; i < 5; i++) {
+    drills[`al:${i}`] = Array.from({ length: 5 }, (_, t) => leaf(`Track ${i}-${t}`, `t:${i}-${t}`));
+  }
+  const svc = buildService([albums], undefined, drills);
+  const out = await svc.searchMusic({ query: "Album", type: "genre", includeStreaming: true, limit: 4 });
+  assert.ok(out.candidates.length <= 4, `expected ≤4 total candidates, got ${out.candidates.length}`);
+});
+
+test("a full page of library artists cannot starve an explicit includeStreaming (issue #8)", async () => {
+  // Fuzzy artist queries easily fill `limit` with library candidates; the
+  // streaming share must survive that, or the "0 Albums" dead end this
+  // fallback exists for comes back. limit 3 → reserve ceil(3/2)=2 → 1 library
+  // candidate (the ranked head) + 2 streaming tracks.
+  const artists: GroupDef = {
+    title: "Artists",
+    key: "g:artists",
+    items: [
+      { ...item("Tycho", "a:1"), subtitle: "0 Albums" },
+      item("Tycho Brahe", "a:2"),
+      item("Tycho Magnetic", "a:3"),
+    ],
+  };
+  const tracks: GroupDef = {
+    title: "Tracks",
+    key: "g:tracks",
+    items: [
+      { title: "A Walk", item_key: "tk:1", subtitle: "Tycho" },
+      { title: "Awake", item_key: "tk:2", subtitle: "Tycho" },
+      { title: "Epoch", item_key: "tk:3", subtitle: "Tycho" },
+    ],
+  };
+  const svc = buildService([artists, tracks]);
+  const out = await svc.searchMusic({ query: "Tycho", type: "artist", includeStreaming: true, limit: 3 });
+
+  assert.equal(out.candidates.length, 3);
+  assert.equal(out.candidates[0]?.title, "Tycho");
+  assert.equal(out.candidates[0]?.sourceGroup, "Artists");
+  const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
+  assert.equal(streaming.length, 2);
+  assert.match(out.message ?? "", /trimmed 2 library candidate/i);
+});
+
+test("a full page of library genres cannot starve an explicit includeStreaming (issue #8)", async () => {
+  // Genre nodes live in the dedicated `genres` hierarchy; four of them match
+  // the query, filling limit 4 on their own. The streaming reserve
+  // (ceil(4/2)=2) keeps 2 genres and adds 2 streaming tracks.
+  const genreRoots: BrowseItem[] = Array.from({ length: 4 }, (_, i) => ({
+    title: `Ambient ${i}`,
+    item_key: `ge:${i}`,
+    hint: "list" as const,
+    subtitle: "3 Artists, 5 Albums",
+  }));
+  const albums: GroupDef = {
+    title: "Albums",
+    key: "g:albums",
+    items: [leaf("Ambient Works", "al:aw"), leaf("Ambient Avenue", "al:ave")],
+  };
+  const drills: Record<string, BrowseItem[]> = {
+    // Genre nodes drill into empty pages (no sub-genres).
+    ...Object.fromEntries(genreRoots.map((g) => [g.item_key!, []])),
+    "al:aw": [leaf("Xtal", "t:1"), leaf("Ageispolis", "t:2")],
+    "al:ave": [leaf("Fire Ant", "t:3"), leaf("Jealous", "t:4")],
+  };
+  const svc = buildService([albums], undefined, drills, genreRoots);
+  const out = await svc.searchMusic({ query: "Ambient", type: "genre", includeStreaming: true, limit: 4 });
+
+  assert.equal(out.candidates.length, 4);
+  const genres = out.candidates.filter((c) => c.type === "genre");
+  const streaming = out.candidates.filter((c) => c.sourceGroup === "Streaming");
+  assert.equal(genres.length, 2);
+  assert.equal(streaming.length, 2);
+  assert.match(out.message ?? "", /trimmed 2 library genre/i);
 });
 
 test("library candidate sourceGroup strips the result count (issue #12)", async () => {
