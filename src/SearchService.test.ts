@@ -164,6 +164,19 @@ test("searchMusic returns ranked candidates keyed by re-navigable locators", asy
   assert.ok((out.candidates[0]?.score ?? 0) > (out.candidates[1]?.score ?? 0));
 });
 
+test("Roon [[id|text]] link markup is stripped from candidates", async () => {
+  const albums: GroupDef = {
+    title: "Albums",
+    key: "g:albums",
+    items: [
+      { ...item("Anotherwave", "al:aw"), subtitle: "[[1481082|Tycho]] & [[16488058|Sea Lemon]]" },
+    ],
+  };
+  const svc = buildService([albums]);
+  const out = await svc.searchMusic({ query: "Anotherwave", type: "album" });
+  assert.equal(out.candidates[0]?.subtitle, "Tycho & Sea Lemon");
+});
+
 test("a type filter collects only the matching category", async () => {
   const svc = buildService([ARTISTS, ALBUMS, GENRES]);
   const out = await svc.searchMusic({ query: "Tycho", type: "artist" });

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { ArtworkService } from "./ArtworkService.js";
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
+import { ItemInfoService } from "./ItemInfoService.js";
 import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
@@ -39,8 +41,20 @@ async function main(): Promise<void> {
   const search = new SearchService(browse, genres, tracks);
   const playback = new PlaybackService(browse, zones, roon, tracks, logger);
   const transport = new TransportService(roon, zones, logger);
+  const items = new ItemInfoService(browse);
+  const artwork = new ArtworkService(roon, logger);
   const libraryExport = new LibraryExportService(browse);
-  const server = new RoonMcpServer(roon, zones, search, tracks, playback, transport, libraryExport);
+  const server = new RoonMcpServer(
+    roon,
+    zones,
+    search,
+    tracks,
+    playback,
+    transport,
+    items,
+    artwork,
+    libraryExport,
+  );
 
   const shutdown = () => {
     void server.stop().finally(() => process.exit(0));
