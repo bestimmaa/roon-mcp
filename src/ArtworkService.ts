@@ -26,7 +26,7 @@ export class ArtworkService {
     const endpoint = this.roon.getCoreHttpEndpoint();
     if (!endpoint) {
       throw new RoonMcpError(
-        "IMAGE_FETCH_FAILED",
+        "CORE_HTTP_UNAVAILABLE",
         "The paired connection did not expose the Core's HTTP host/port, so artwork cannot be fetched.",
       );
     }

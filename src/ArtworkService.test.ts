@@ -85,10 +85,10 @@ test("a network failure maps to IMAGE_FETCH_FAILED", async () => {
   );
 });
 
-test("a connection without an exposed HTTP endpoint maps to IMAGE_FETCH_FAILED", async () => {
+test("a connection without an exposed HTTP endpoint maps to CORE_HTTP_UNAVAILABLE", async () => {
   const service = new ArtworkService(stubClient(undefined), silentLogger, async () => okResponse());
   await assert.rejects(
     service.getArtwork({ imageKey: "k" }),
-    (err: unknown) => err instanceof RoonMcpError && err.code === "IMAGE_FETCH_FAILED",
+    (err: unknown) => err instanceof RoonMcpError && err.code === "CORE_HTTP_UNAVAILABLE",
   );
 });

@@ -236,10 +236,11 @@ export class RoonMcpServer {
           "imageKey (from now_playing or get_item_info) into the actual image, " +
           "fetched from the Core's HTTP image endpoint and returned as an MCP " +
           "image content block (base64). Optional width/height set the " +
-          "bounding box in pixels (default 512); the image is scaled to fit. " +
-          "Fails with IMAGE_FETCH_FAILED when the key is stale or the Core is " +
-          "unreachable over HTTP — re-read the key from now_playing or " +
-          "get_item_info and retry.",
+          "bounding box in pixels (default 512, max 1024); the image is scaled " +
+          "to fit. Fails with IMAGE_FETCH_FAILED when the key is stale or the " +
+          "Core is unreachable over HTTP — re-read the key from now_playing or " +
+          "get_item_info and retry. Fails with CORE_HTTP_UNAVAILABLE when the " +
+          "paired connection doesn't expose the Core's HTTP host/port.",
         inputSchema: {
           imageKey: z
             .string()
@@ -249,16 +250,16 @@ export class RoonMcpServer {
             .number()
             .int()
             .min(16)
-            .max(2048)
+            .max(1024)
             .optional()
-            .describe("Bounding-box width in pixels (default 512)."),
+            .describe("Bounding-box width in pixels (default 512, max 1024)."),
           height: z
             .number()
             .int()
             .min(16)
-            .max(2048)
+            .max(1024)
             .optional()
-            .describe("Bounding-box height in pixels (default 512)."),
+            .describe("Bounding-box height in pixels (default 512, max 1024)."),
         },
       },
       async (args) => {

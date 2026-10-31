@@ -105,9 +105,9 @@ export interface GetItemInfoOutput {
 export interface GetArtworkInput {
   /** Image key from `now_playing` or `get_item_info`. */
   imageKey: string;
-  /** Bounding-box width in pixels (default 512). */
+  /** Bounding-box width in pixels (default 512, max 1024). */
   width?: number;
-  /** Bounding-box height in pixels (default 512). */
+  /** Bounding-box height in pixels (default 512, max 1024). */
   height?: number;
 }
 
@@ -265,6 +265,7 @@ export type RoonMcpErrorCode =
   | "ACTION_FAILED"
   | "PARTIAL_QUEUE"
   | "IMAGE_FETCH_FAILED"
+  | "CORE_HTTP_UNAVAILABLE"
   | "INTERNAL_ERROR";
 
 export class RoonMcpError extends Error {
