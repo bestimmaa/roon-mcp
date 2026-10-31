@@ -6,6 +6,7 @@ import pkg from "../package.json" with { type: "json" };
 import { RoonMcpServer } from "./RoonMcpServer.js";
 import { ArtworkService } from "./ArtworkService.js";
 import { ItemInfoService } from "./ItemInfoService.js";
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
@@ -28,6 +29,7 @@ function buildServer(): RoonMcpServer {
     {} as unknown as TransportService,
     {} as unknown as ItemInfoService,
     {} as unknown as ArtworkService,
+    {} as unknown as LibraryExportService,
   );
 }
 

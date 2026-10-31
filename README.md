@@ -90,11 +90,13 @@ npm install -g roon-mcp
 | `pause_all()` | Pause every zone on the Core in one call. Resume per zone with `control_playback`. |
 | `mute_all({ muted })` | Mute (`muted: true`) or unmute (`muted: false`) every mutable output on the Core. |
 | `set_auto_radio({ zoneId?, enabled })` | Turn Roon Radio on/off for a zone: `enabled: true` appends similar tracks once the queue ends, `false` stops playback at queue end. |
+| `library_export({ path, limit? })` | Walk Library → Albums and write the album catalog to `path` as JSON (written atomically; parents created; an existing file is only replaced if it is an earlier snapshot). The albums go to the **file** — the result carries only counts and timings. Can take tens of seconds on a large library, and holds the browse session for the whole walk (search/play calls wait behind it). |
 
 ### Streaming search (genre and artist)
 
 - **Genre search** fuzzy-matches what you type — "psychedelic trance" will find the right genre even if the name isn't exact. By default results come from your library.
 - **`includeStreaming: true`** (on `type:"genre"` or `type:"artist"`) extends the search to your streaming service, so you can play artists or genres that aren't in your local collection.
+- **`limit` caps the combined result.** Library results come first; streaming tracks fill the remaining slots. When library results alone would fill the limit, up to half of it is reserved for streaming (trimming the lowest-ranked library tail, noted in `message`) so an explicit `includeStreaming` always surfaces streaming content when it exists.
 
 ### Notes
 
@@ -111,6 +113,12 @@ claims a lock file (`instance.lock`, next to `config.json`) and every other inst
 fails fast with a `CORE_PAIRING_HELD` error naming the pid that holds it, instead of
 flapping between paired/unpaired.
 
+A lock whose owning process is no longer alive is treated as stale and taken over —
+both at startup and by an already-running blocked instance, which re-checks the lock
+on every call. So when the holder exits (cleanly or via `kill -9`), the next call to
+any other instance acquires the lock, starts discovery, and pairs; nothing needs
+restarting.
+
 MCP clients don't always reap server processes when a session ends, so orphaned
 `roon-mcp` instances can pile up and hold the lock long after their terminal is gone. If
 you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
@@ -119,7 +127,8 @@ you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
 pkill -f roon-mcp
 ```
 
-The next instance you start will then acquire the lock normally.
+Blocked instances that are still running recover on their own next call, and the next
+instance you start acquires the lock normally.
 
 ## Assumptions
 

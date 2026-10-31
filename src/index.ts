@@ -3,6 +3,7 @@ import { ArtworkService } from "./ArtworkService.js";
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { ItemInfoService } from "./ItemInfoService.js";
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { RoonMcpServer } from "./RoonMcpServer.js";
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
   const transport = new TransportService(roon, zones, logger);
   const items = new ItemInfoService(browse);
   const artwork = new ArtworkService(roon, logger);
+  const libraryExport = new LibraryExportService(browse);
   const server = new RoonMcpServer(
     roon,
     zones,
@@ -51,6 +53,7 @@ async function main(): Promise<void> {
     transport,
     items,
     artwork,
+    libraryExport,
   );
 
   const shutdown = () => {

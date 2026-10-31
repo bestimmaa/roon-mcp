@@ -2,6 +2,7 @@ import type { BrowseItem } from "node-roon-api-browse";
 
 import { BrowseSessionManager } from "./BrowseSessionManager.js";
 import { encodeGenreLocator } from "./locator.js";
+import { GENRES_HIERARCHY, normalize } from "./SearchNavigator.js";
 import type { MusicCandidate } from "./types.js";
 
 // Roon's flat `search` hierarchy doesn't expose genres; they live in a dedicated
@@ -31,10 +32,6 @@ interface GenreEntry {
   /** Genre node titles from the root, e.g. ["Electronic", "Trance", "Psytrance"]. */
   path: string[];
   title: string;
-}
-
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
 }
 
 /** Lowercased alphanumerics only — collapses "Psy-Trance"/"Psy Trance" alike. */
@@ -197,7 +194,7 @@ export class GenreService {
     // and popping a sibling (same pattern as SearchService.collectFromGroups).
     return this.browse.runExclusive(async () => {
       const entries: GenreEntry[] = [];
-      await this.browse.browse({ hierarchy: "genres", pop_all: true });
+      await this.browse.browse({ hierarchy: GENRES_HIERARCHY, pop_all: true });
       await this.walk([], entries, 0);
       return entries;
     });
@@ -209,7 +206,7 @@ export class GenreService {
    * parent's keys stay valid for the next sibling.
    */
   private async walk(path: string[], entries: GenreEntry[], depth: number): Promise<void> {
-    const loaded = await this.browse.load({ hierarchy: "genres", offset: 0, count: SCAN_COUNT });
+    const loaded = await this.browse.load({ hierarchy: GENRES_HIERARCHY, offset: 0, count: SCAN_COUNT });
     const nodes = loaded.items.filter(isGenreNode);
 
     for (const node of nodes) {
@@ -217,11 +214,11 @@ export class GenreService {
       entries.push({ path: childPath, title: node.title });
       if (depth + 1 >= MAX_DEPTH) continue;
 
-      const into = await this.browse.browse({ hierarchy: "genres", item_key: node.item_key! });
+      const into = await this.browse.browse({ hierarchy: GENRES_HIERARCHY, item_key: node.item_key! });
       if (into.action !== "list") continue;
       await this.walk(childPath, entries, depth + 1);
       // Level-scoped keys: pop back to this level before the next sibling.
-      await this.browse.browse({ hierarchy: "genres", pop_levels: 1 });
+      await this.browse.browse({ hierarchy: GENRES_HIERARCHY, pop_levels: 1 });
     }
   }
 }

@@ -1,13 +1,12 @@
 import type { BrowseItem } from "node-roon-api-browse";
 
-import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { BrowseSessionManager, isStaleSession } from "./BrowseSessionManager.js";
 import { GenreService } from "./GenreService.js";
 import { stripRoonLinks } from "./ItemInfoService.js";
 import { encodeLocator } from "./locator.js";
-import { SEARCH_HIERARCHY, isSelectable } from "./SearchNavigator.js";
+import { SEARCH_HIERARCHY, isSelectable, normalize } from "./SearchNavigator.js";
 import { perAlbumBudget, TrackExpansionService } from "./TrackExpansionService.js";
 import {
-  RoonMcpError,
   type MusicCandidate,
   type MusicItemType,
   type SearchMusicInput,
@@ -32,10 +31,6 @@ const GROUP_TITLE_TO_TYPE: Record<string, MusicItemType> = {
   "internet radio": "radio",
 };
 
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
-
 /** Strip a trailing count, e.g. "Albums (12)" → "albums". */
 function groupTitleToType(title: string): MusicItemType {
   const cleaned = normalize(title).replace(/\s*\(\d+\)\s*$/, "");
@@ -50,6 +45,21 @@ function groupTitleToType(title: string): MusicItemType {
  */
 function cleanGroupTitle(title: string): string {
   return title.replace(/\s*\(\d+\)\s*$/, "").trim();
+}
+
+/**
+ * How many of `limit`'s slots to request from streaming: whatever the library
+ * share leaves free, but at least a reserved ceil(limit/2) — an explicit
+ * `includeStreaming` must never be silently starved by a full page of library
+ * results (issue #8). Streaming exists to rescue dead ends (a "0 Albums"
+ * artist, a genre outside the library), and a fuzzy query fills `limit` with
+ * library candidates exactly when that rescue matters. Callers backfill any
+ * unused streaming slots from the library tail, so the combined total still
+ * never exceeds `limit`.
+ */
+function streamingBudget(limit: number, libraryCount: number): number {
+  const reserve = Math.ceil(limit / 2);
+  return limit - Math.min(libraryCount, limit - reserve);
 }
 
 /** Turns a text query into ranked browse candidates via the search hierarchy. */
@@ -81,13 +91,32 @@ export class SearchService {
     // library results first, streaming tracks appended with sourceGroup
     // "Streaming". See collectStreamingArtistTracks.
     if (input.type === "artist" && input.includeStreaming) {
-      const streaming = await this.collectStreamingArtistTracks(input.query, limit);
+      // Budget streaming against the overall limit so the combined result
+      // never exceeds `limit`, with a reserved streaming share so the library
+      // page can't starve the rescue this fallback exists for (issue #8).
+      const budget = streamingBudget(limit, library.candidates.length);
+      const streaming = budget > 0 ? await this.collectStreamingArtistTracks(input.query, budget) : [];
       if (streaming.length > 0) {
-        const candidates = [...library.candidates, ...streaming];
-        const message = library.message
-          ? `${library.message} Also showing ${streaming.length} streaming track(s).`
-          : `No library artist matched "${input.query}"; showing streaming tracks.`;
-        return { query: input.query, candidates, broadened: library.broadened, message };
+        // Library keeps its ranked head; only the fuzzy tail makes room.
+        const kept = library.candidates.slice(0, limit - streaming.length);
+        const trimmed = library.candidates.length - kept.length;
+        const also = `Also showing ${streaming.length} streaming track(s).`;
+        let message =
+          kept.length === 0
+            ? `No library artist matched "${input.query}"; showing streaming tracks.`
+            : library.message
+              ? `${library.message} ${also}`
+              : also;
+        if (trimmed > 0) {
+          message += ` Trimmed ${trimmed} library candidate(s) to stay within the limit.`;
+        }
+        return { query: input.query, candidates: [...kept, ...streaming], broadened: library.broadened, message };
+      }
+      // Streaming was explicitly requested but found nothing: say so where the
+      // library side already flagged a dead end, instead of leaving the agent
+      // to wonder whether the budget ate the streaming results.
+      if (library.message) {
+        return { ...library, message: `${library.message} No streaming tracks were found.` };
       }
     }
 
@@ -103,10 +132,19 @@ export class SearchService {
 
     let streamingTracks: MusicCandidate[] = [];
     if (includeStreaming) {
-      streamingTracks = await this.collectStreamingGenreTracks(query, limit);
+      // Same budget-with-reserve as the artist path (issue #8): the combined
+      // result never exceeds `limit`, and an explicit includeStreaming is
+      // never starved by a full page of library genres.
+      const budget = streamingBudget(limit, libraryGenres.length);
+      if (budget > 0) {
+        streamingTracks = await this.collectStreamingGenreTracks(query, budget);
+      }
     }
 
-    const candidates = [...libraryGenres, ...streamingTracks];
+    // Library keeps its ranked head; unused streaming budget backfills tail genres.
+    const keptGenres = libraryGenres.slice(0, limit - streamingTracks.length);
+    const trimmed = libraryGenres.length - keptGenres.length;
+    const candidates = [...keptGenres, ...streamingTracks];
 
     let message: string | undefined;
     if (candidates.length === 0) {
@@ -116,6 +154,10 @@ export class SearchService {
     } else if ((libraryGenres[0]?.score ?? 0) < 1) {
       const suffix = includeStreaming ? "; also showing streaming tracks" : "";
       message = `No genre exactly named "${query}"; showing nearest genres${suffix}.`;
+    }
+    if (trimmed > 0) {
+      const note = `Trimmed ${trimmed} library genre(s) to stay within the limit.`;
+      message = message ? `${message} ${note}` : note;
     }
     return { query, candidates, broadened: false, message };
   }
@@ -239,20 +281,24 @@ export class SearchService {
     }
 
     let broadened = false;
+    const scanned = new Set<number>();
     let candidates = await this.collectFromGroups(
       input.query,
       groups,
       this.selectGroupIndices(groups, input.type),
       limit,
+      scanned,
     );
 
-    // If a typed search came back empty, broaden to all categories.
+    // If a typed search came back empty, broaden to all categories. Groups the
+    // typed pass fully scanned yielded nothing, so skip them; a group that
+    // failed with a stale session is retried.
     if (candidates.length === 0 && input.type) {
       broadened = true;
       candidates = await this.collectFromGroups(
         input.query,
         groups,
-        groups.map((_, idx) => idx),
+        groups.map((_, idx) => idx).filter((idx) => !scanned.has(idx)),
         limit,
       );
     }
@@ -272,7 +318,11 @@ export class SearchService {
     // searchMusic picks this up.
     if (input.type === "artist" && /^\s*0\s+albums?\s*$/i.test(ranked[0]?.subtitle ?? "")) {
       const name = ranked[0]!.title;
-      const hint = `Artist "${name}" has no library albums; pass includeStreaming:true to sample streaming tracks.`;
+      // Don't advise a flag the caller already passed; searchMusic appends
+      // what the streaming side actually found.
+      const hint = input.includeStreaming
+        ? `Artist "${name}" has no library albums.`
+        : `Artist "${name}" has no library albums; pass includeStreaming:true to sample streaming tracks.`;
       message = message ? `${message} ${hint}` : hint;
     }
 
@@ -291,6 +341,8 @@ export class SearchService {
     groups: BrowseItem[],
     indices: number[],
     limit: number,
+    /** Receives each group index that was scanned without error. */
+    scanned?: Set<number>,
   ): Promise<MusicCandidate[]> {
     const out: MusicCandidate[] = [];
     for (const g of indices) {
@@ -300,7 +352,10 @@ export class SearchService {
         const nav = await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, item_key: group.item_key });
         // action:"none" means Roon didn't push a new level (e.g. a "No Results"
         // placeholder item) — nothing to load and nothing to pop.
-        if (nav.action !== "list") continue;
+        if (nav.action !== "list") {
+          scanned?.add(g);
+          continue;
+        }
         const loaded = await this.browse.load({
           hierarchy: SEARCH_HIERARCHY,
           offset: 0,
@@ -326,9 +381,10 @@ export class SearchService {
         // item_keys are level-scoped: pop back to the group list before the
         // next group so its keys stay valid.
         await this.browse.browse({ hierarchy: SEARCH_HIERARCHY, pop_levels: 1 });
+        scanned?.add(g);
       } catch (err) {
         // A single bad group shouldn't sink the whole search.
-        if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") continue;
+        if (isStaleSession(err)) continue;
         throw err;
       }
     }

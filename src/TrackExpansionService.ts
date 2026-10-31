@@ -1,6 +1,6 @@
 import type { BrowseHierarchy, BrowseItem, BrowseList, BrowseResultBody } from "node-roon-api-browse";
 
-import { BrowseSessionManager } from "./BrowseSessionManager.js";
+import { BrowseSessionManager, isStaleSession } from "./BrowseSessionManager.js";
 import {
   encodeGenreLocator,
   encodeLocator,
@@ -10,7 +10,13 @@ import {
   type GenreLocator,
   type Locator,
 } from "./locator.js";
-import { SearchNavigator, requireLocator } from "./SearchNavigator.js";
+import {
+  SearchNavigator,
+  isContainer,
+  isSelectable,
+  normalize,
+  requireLocator,
+} from "./SearchNavigator.js";
 import {
   RoonMcpError,
   type GetTracksForInput,
@@ -51,10 +57,6 @@ const PLAY_ACTION_LABELS = [
   "start radio",
 ];
 
-function normalize(text: string): string {
-  return text.trim().toLowerCase();
-}
-
 /**
  * Per-album track budget when spreading a total `limit` across `count` albums,
  * so the result draws from several albums rather than draining the first. At
@@ -87,18 +89,13 @@ function isTrackLeaf(item: BrowseItem): boolean {
   return !isPlayAction(item);
 }
 
-/** A navigable sub-list to drill into (an album, or a "Top Tracks" container). */
-function isContainer(item: BrowseItem): boolean {
-  return Boolean(item.item_key) && item.hint === "list";
-}
-
 /**
  * True when the opened item is itself a single playable leaf: drilling into a
  * track yields its action menu (Play Now, Queue, …) rather than a child list.
  */
 function looksLikeActionList(list: BrowseList | undefined, items: BrowseItem[]): boolean {
   if (list?.hint === "action_list") return true;
-  const selectable = items.filter((i) => i.item_key && i.hint !== "header");
+  const selectable = items.filter(isSelectable);
   return selectable.length > 0 && selectable.every((i) => i.hint === "action");
 }
 
@@ -172,7 +169,7 @@ export class TrackExpansionService {
       } catch (err) {
         // A stale/invalid locator can't be retried; report it as skipped so the
         // agent can re-search instead of throwing.
-        if (err instanceof RoonMcpError && err.code === "INVALID_ITEM_KEY") {
+        if (isStaleSession(err)) {
           return {
             sourceItemKey: input.itemKey,
             tracks: [],

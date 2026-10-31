@@ -1,27 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 import { ArtworkService } from "./ArtworkService.js";
 import { ItemInfoService } from "./ItemInfoService.js";
+import { LibraryExportService } from "./LibraryExportService.js";
 import { PlaybackService } from "./PlaybackService.js";
 import { RoonClient } from "./RoonClient.js";
 import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
-import { RoonMcpError } from "./types.js";
+import { MUSIC_ITEM_TYPES, RoonMcpError, TRANSPORT_ACTIONS } from "./types.js";
 import pkg from "../package.json" with { type: "json" };
-
-const MUSIC_ITEM_TYPES = [
-  "artist",
-  "album",
-  "track",
-  "genre",
-  "playlist",
-  "radio",
-  "unknown",
-] as const;
 
 /**
  * Owns MCP startup and tool registration, and maps tool calls to services.
@@ -40,6 +32,7 @@ export class RoonMcpServer {
     private readonly transport: TransportService,
     private readonly items: ItemInfoService,
     private readonly artwork: ArtworkService,
+    private readonly libraryExport: LibraryExportService,
   ) {
     this.server = new McpServer({
       name: "roon-mcp",
@@ -62,16 +55,12 @@ export class RoonMcpServer {
           "first if no zone is obvious and ROON_DEFAULT_ZONE is not set.",
         inputSchema: {},
       },
-      async () => {
-        try {
-          const zones = await this.zones.listZones();
-          const message =
-            zones.length === 0 ? "No zones available on the paired Core." : undefined;
-          return structured({ zones, ...(message ? { message } : {}) });
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle(async () => {
+        const zones = await this.zones.listZones();
+        const message =
+          zones.length === 0 ? "No zones available on the paired Core." : undefined;
+        return { zones, ...(message ? { message } : {}) };
+      }),
     );
 
     this.server.registerTool(
@@ -134,14 +123,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.search.searchMusic(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.search.searchMusic(args)),
     );
 
     this.server.registerTool(
@@ -175,14 +157,7 @@ export class RoonMcpServer {
             .describe("Max tracks to return (default 10)."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.tracks.getTracksFor(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.tracks.getTracksFor(args)),
     );
 
     this.server.registerTool(
@@ -326,14 +301,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.playback.playNow(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.playback.playNow(args)),
     );
 
     this.server.registerTool(
@@ -376,14 +344,7 @@ export class RoonMcpServer {
             .describe("Shuffle the queue; omit to leave the zone's setting unchanged."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.playback.enqueueAndPlay(args);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.playback.enqueueAndPlay(args)),
     );
 
     this.server.registerTool(
@@ -420,14 +381,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const info = await this.transport.getNowPlaying(args.zoneId);
-          return structured(info);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.getNowPlaying(args.zoneId)),
     );
 
     this.server.registerTool(
@@ -457,7 +411,7 @@ export class RoonMcpServer {
                 "ROON_DEFAULT_ZONE or fall back automatically (see now_playing).",
             ),
           action: z
-            .enum(["pause", "resume", "next", "previous", "stop", "playpause"])
+            .enum(TRANSPORT_ACTIONS)
             .describe(
               "Transport verb to run: 'pause' to stop playback, 'resume' to " +
                 "restart it, 'next' to skip to the next track, 'previous' to " +
@@ -466,14 +420,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.control(args.zoneId, args.action);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.control(args.zoneId, args.action)),
     );
 
     this.server.registerTool(
@@ -513,14 +460,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.setVolume(args.zoneId, args.level);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.setVolume(args.zoneId, args.level)),
     );
 
     this.server.registerTool(
@@ -547,14 +487,7 @@ export class RoonMcpServer {
             .describe("`true` to mute, `false` to unmute."),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.mute(args.zoneId, args.muted);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.mute(args.zoneId, args.muted)),
     );
 
     this.server.registerTool(
@@ -593,18 +526,14 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.seek(
-            args.zoneId,
-            args.seconds,
-            args.mode ?? "absolute",
-          );
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle(async (args) => {
+        const result = await this.transport.seek(
+          args.zoneId,
+          args.seconds,
+          args.mode ?? "absolute",
+        );
+        return result;
+      }),
     );
 
     this.server.registerTool(
@@ -636,14 +565,7 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          const result = await this.transport.setLoop(args.zoneId, args.mode);
-          return structured(result);
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.setLoop(args.zoneId, args.mode)),
     );
 
     this.server.registerTool(
@@ -656,13 +578,7 @@ export class RoonMcpServer {
           "per zone with control_playback.",
         inputSchema: {},
       },
-      async () => {
-        try {
-          return structured(await this.transport.pauseAll());
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle(() => this.transport.pauseAll()),
     );
 
     this.server.registerTool(
@@ -678,13 +594,7 @@ export class RoonMcpServer {
           muted: z.boolean().describe("`true` to mute every zone, `false` to unmute."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.muteAll(args.muted));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.muteAll(args.muted)),
     );
 
     this.server.registerTool(
@@ -709,13 +619,7 @@ export class RoonMcpServer {
           enabled: z.boolean().describe("`true` to enable Roon Radio, `false` to disable."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.setAutoRadio(args.zoneId, args.enabled));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.setAutoRadio(args.zoneId, args.enabled)),
     );
 
     this.server.registerTool(
@@ -748,13 +652,7 @@ export class RoonMcpServer {
             .describe("Max queue entries to return (default 25)."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.getQueue(args.zoneId, args.limit ?? 25));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.getQueue(args.zoneId, args.limit ?? 25)),
     );
 
     this.server.registerTool(
@@ -783,13 +681,7 @@ export class RoonMcpServer {
             .describe("Queue item id from a recent get_queue result."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.playFromHere(args.zoneId, args.queueItemId));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.playFromHere(args.zoneId, args.queueItemId)),
     );
 
     this.server.registerTool(
@@ -818,13 +710,7 @@ export class RoonMcpServer {
             .describe("Destination zone id or name substring from list_zones."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.transferZone(args.fromZoneId, args.toZoneId));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.transferZone(args.fromZoneId, args.toZoneId)),
     );
 
     this.server.registerTool(
@@ -849,13 +735,44 @@ export class RoonMcpServer {
             ),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "group"));
-        } catch (err) {
-          return toToolError(err);
-        }
+      handle((args) => this.transport.groupOutputs(args.zonesOrOutputs, "group")),
+    );
+
+    this.server.registerTool(
+      "library_export",
+      {
+        title: "Export the Roon library album catalog to a JSON file",
+        description:
+          "Use this to snapshot the user's library albums (the deliberately-added " +
+          "collection, not listening history) as a JSON file — e.g. to hand to a " +
+          "downstream recommendation or diffing tool. Walks Library → Albums and " +
+          "writes `path` atomically (parents created); an existing file is only " +
+          "replaced if it is an earlier snapshot, anything else is refused " +
+          "with EXPORT_PATH_REFUSED. Can take tens " +
+          "of seconds on a large library, and holds the browse session for the " +
+          "whole walk, so search_music, get_tracks_for and play_now wait behind " +
+          "it — don't run it mid-listening-session. IMPORTANT: the album data goes to the " +
+          "FILE, never returned here — the result is only { status, path, " +
+          "albumCount, durationMs, expectedCount? } plus a `warning` when the " +
+          "collected count doesn't match what Roon reported.",
+        inputSchema: {
+          path: z
+            .string()
+            .min(1)
+            .refine((p) => isAbsolute(p), { message: "path must be absolute" })
+            .describe(
+              "Absolute path to write the snapshot JSON to (parents created). " +
+                "An existing file is only replaced if it is an earlier snapshot.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Optional cap on albums exported (for testing); omit for the full library."),
+        },
       },
+      handle((args) => this.libraryExport.export(args)),
     );
 
     this.server.registerTool(
@@ -875,13 +792,7 @@ export class RoonMcpServer {
             .describe("Zone/output ids or name substrings to detach from their group."),
         },
       },
-      async (args) => {
-        try {
-          return structured(await this.transport.groupOutputs(args.zonesOrOutputs, "ungroup"));
-        } catch (err) {
-          return toToolError(err);
-        }
-      },
+      handle((args) => this.transport.groupOutputs(args.zonesOrOutputs, "ungroup")),
     );
   }
 
@@ -895,6 +806,18 @@ export class RoonMcpServer {
     this.roon.stop();
     await this.server.close();
   }
+}
+
+/** Wrap a tool implementation: its result becomes structured content, and any
+ * throw becomes a tool error. */
+function handle<A>(run: (args: A) => Promise<unknown>) {
+  return async (args: A) => {
+    try {
+      return structured(await run(args));
+    } catch (err) {
+      return toToolError(err);
+    }
+  };
 }
 
 function structured(payload: unknown) {
