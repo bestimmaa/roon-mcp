@@ -9,6 +9,7 @@ import { SearchService } from "./SearchService.js";
 import { TrackExpansionService } from "./TrackExpansionService.js";
 import { TransportService } from "./TransportService.js";
 import { ZoneService } from "./ZoneService.js";
+import { installShutdown } from "./lifecycle.js";
 import { createStderrLogger, redirectConsoleToStderr } from "./logger.js";
 
 // node-roon-api logs discovery chatter via console.log. On a stdio MCP server
@@ -42,11 +43,15 @@ async function main(): Promise<void> {
   const libraryExport = new LibraryExportService(browse);
   const server = new RoonMcpServer(roon, zones, search, tracks, playback, transport, libraryExport);
 
-  const shutdown = () => {
-    void server.stop().finally(() => process.exit(0));
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  // Exit when the MCP client disconnects (stdin EOF) as well as on signals, so
+  // an ended session doesn't leave an orphan holding the pairing lock.
+  installShutdown({
+    stdin: process.stdin,
+    signals: process,
+    stop: () => server.stop(),
+    exit: (code) => process.exit(code),
+    log: (message) => process.stderr.write(`[roon-mcp] ${message}\n`),
+  });
 
   await server.start();
 }

@@ -117,9 +117,10 @@ on every call. So when the holder exits (cleanly or via `kill -9`), the next cal
 any other instance acquires the lock, starts discovery, and pairs; nothing needs
 restarting.
 
-MCP clients don't always reap server processes when a session ends, so orphaned
-`roon-mcp` instances can pile up and hold the lock long after their terminal is gone. If
-you hit `CORE_PAIRING_HELD` unexpectedly, clear them out:
+The server also exits when its MCP client disconnects (stdin closes), not only on
+`SIGINT`/`SIGTERM`, so an ended session doesn't leave an orphan holding the lock.
+Instances started by older versions can still be lingering, though; if you hit
+`CORE_PAIRING_HELD` unexpectedly, clear them out:
 
 ```bash
 pkill -f roon-mcp
