@@ -118,7 +118,7 @@ any other instance acquires the lock, starts discovery, and pairs; nothing needs
 restarting.
 
 The server also exits when its MCP client disconnects (stdin closes), not only on
-`SIGINT`/`SIGTERM`/`SIGHUP`, so an ended session doesn't leave an orphan holding the lock.
+`SIGINT`/`SIGTERM`, so an ended session doesn't leave an orphan holding the lock.
 Instances started by older versions can still be lingering, though; if you hit
 `CORE_PAIRING_HELD` unexpectedly, clear them out:
 

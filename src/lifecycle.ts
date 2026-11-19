@@ -1,7 +1,7 @@
 import type { EventEmitter } from "node:events";
 
 /** How long `stop()` may take before the process exits anyway. */
-export const SHUTDOWN_GRACE_MS = 3_000;
+const SHUTDOWN_GRACE_MS = 3_000;
 
 export interface ShutdownOptions {
   /** The MCP client's end of the stdio pipe (normally `process.stdin`). */
@@ -24,12 +24,13 @@ export interface ShutdownOptions {
  * reaped) nothing fires — and the open Roon websocket keeps the event loop
  * alive. The orphan then holds the single-owner pairing lock indefinitely,
  * and because its pid is still alive, other instances can't take the lock
- * over as stale. Treating stdin EOF as a shutdown request closes that gap.
+ * over as stale. Treating the end of stdin as a shutdown request closes that
+ * gap. (stdin only reports `end` once the transport has started reading it.)
  *
- * Returns the shutdown trigger. It is idempotent, and exits after
- * `graceMs` even if `stop()` hangs or rejects.
+ * Shutdown runs once. It exits 0 when `stop()` succeeds, and 1 when `stop()`
+ * rejects or is still pending after `graceMs`.
  */
-export function installShutdown(opts: ShutdownOptions): (reason: string) => void {
+export function installShutdown(opts: ShutdownOptions): void {
   const { stdin, signals, stop, exit, log = () => {}, graceMs = SHUTDOWN_GRACE_MS } = opts;
   let shuttingDown = false;
 
@@ -39,22 +40,27 @@ export function installShutdown(opts: ShutdownOptions): (reason: string) => void
     log(`shutting down: ${reason}`);
     const timer = setTimeout(() => {
       log(`shutdown did not finish within ${graceMs}ms; exiting anyway`);
-      exit(0);
+      exit(1);
     }, graceMs);
-    stop()
-      .catch((err: unknown) => {
-        log(`error during shutdown: ${err instanceof Error ? err.message : String(err)}`);
-      })
-      .finally(() => {
+    stop().then(
+      () => {
         clearTimeout(timer);
         exit(0);
-      });
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        log(`error during shutdown: ${err instanceof Error ? err.message : String(err)}`);
+        exit(1);
+      },
+    );
   };
 
-  stdin.once("end", () => shutdown("MCP client closed stdin"));
-  stdin.once("close", () => shutdown("MCP client closed stdin"));
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  // `end` is a clean EOF; `close`/`error` cover a pipe that was destroyed or
+  // broke without one.
+  for (const event of ["end", "close", "error"]) {
+    stdin.once(event, () => shutdown(`MCP client closed stdin (${event})`));
+  }
+  for (const signal of ["SIGINT", "SIGTERM"]) {
     signals.once(signal, () => shutdown(`received ${signal}`));
   }
-  return shutdown;
 }

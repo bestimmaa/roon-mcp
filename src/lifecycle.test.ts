@@ -1,49 +1,39 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { mock, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { installShutdown } from "./lifecycle.js";
 
-function harness(stop: () => Promise<void> = async () => {}, graceMs = 1_000) {
+function harness(stop: () => Promise<void> = async () => {}) {
   const stdin = new EventEmitter();
   const signals = new EventEmitter();
-  const exits: number[] = [];
-  let stops = 0;
-  let exited!: () => void;
-  const exitedPromise = new Promise<void>((resolve) => (exited = resolve));
-  installShutdown({
-    stdin,
-    signals,
-    stop: () => {
-      stops += 1;
-      return stop();
-    },
-    exit: (code) => {
-      exits.push(code);
-      exited();
-    },
-    graceMs,
-  });
-  return { stdin, signals, exits, stops: () => stops, exited: exitedPromise };
+  const stopFn = mock.fn(stop);
+  const exit = mock.fn((_code: number) => {});
+  installShutdown({ stdin, signals, stop: stopFn, exit, graceMs: 1_000 });
+  const exitCodes = () => exit.mock.calls.map((c) => c.arguments[0]);
+  return { stdin, signals, stopFn, exitCodes };
 }
 
-for (const event of ["end", "close"]) {
-  test(`stdin '${event}' stops the server and exits 0`, async () => {
-    const h = harness();
-    h.stdin.emit(event);
-    await h.exited;
-    assert.equal(h.stops(), 1);
-    assert.deepEqual(h.exits, [0]);
-  });
-}
+const flush = () => new Promise((r) => setImmediate(r));
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  test(`${signal} stops the server and exits 0`, async () => {
+for (const [source, event] of [
+  ["stdin", "end"],
+  ["stdin", "close"],
+  ["stdin", "error"],
+  ["signals", "SIGINT"],
+  ["signals", "SIGTERM"],
+] as const) {
+  test(`${source} '${event}' stops the server and exits 0`, async () => {
     const h = harness();
-    h.signals.emit(signal);
-    await h.exited;
-    assert.equal(h.stops(), 1);
-    assert.deepEqual(h.exits, [0]);
+    h[source].emit(event, new Error("pipe broke"));
+    await flush();
+    assert.equal(h.stopFn.mock.callCount(), 1);
+    assert.deepEqual(h.exitCodes(), [0]);
   });
 }
 
@@ -52,26 +42,50 @@ test("repeated triggers stop and exit only once", async () => {
   h.stdin.emit("end");
   h.stdin.emit("close");
   h.signals.emit("SIGTERM");
-  await h.exited;
-  await new Promise((r) => setImmediate(r));
-  assert.equal(h.stops(), 1);
-  assert.deepEqual(h.exits, [0]);
+  await flush();
+  assert.equal(h.stopFn.mock.callCount(), 1);
+  assert.deepEqual(h.exitCodes(), [0]);
 });
 
-test("a rejecting stop() still exits", async () => {
+test("a rejecting stop() exits 1", async () => {
   const h = harness(async () => {
     throw new Error("boom");
   });
   h.stdin.emit("end");
-  await h.exited;
-  assert.deepEqual(h.exits, [0]);
+  await flush();
+  assert.deepEqual(h.exitCodes(), [1]);
 });
 
-test("a hanging stop() exits after the grace period", async () => {
-  const h = harness(() => new Promise<void>(() => {}), 20);
-  const started = Date.now();
+test("a hanging stop() exits 1 after the grace period", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = harness(() => new Promise<void>(() => {}));
   h.stdin.emit("end");
-  await h.exited;
-  assert.deepEqual(h.exits, [0]);
-  assert.ok(Date.now() - started >= 15);
+  t.mock.timers.tick(999);
+  assert.deepEqual(h.exitCodes(), []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(h.exitCodes(), [1]);
+});
+
+test("the built server exits when its client closes stdin", async () => {
+  // Point the server at a closed local port with a throwaway config, so it
+  // neither touches a real Core nor the user's pairing lock.
+  const configDir = mkdtempSync(join(tmpdir(), "roon-mcp-lifecycle-"));
+  try {
+    const entry = join(dirname(fileURLToPath(import.meta.url)), "index.js");
+    const child = spawn(process.execPath, [entry], {
+      env: { ...process.env, ROON_MCP_CONFIG: configDir, ROON_HOST: "127.0.0.1", ROON_PORT: "1" },
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const exited = once(child, "exit");
+    child.stdin.end();
+    const timeout = setTimeout(() => child.kill(), 5_000);
+    const [code] = await exited;
+    clearTimeout(timeout);
+    assert.equal(code, 0, stderr);
+    assert.match(stderr, /shutting down: MCP client closed stdin/);
+  } finally {
+    rmSync(configDir, { recursive: true, force: true });
+  }
 });
