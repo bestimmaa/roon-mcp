@@ -251,6 +251,43 @@ export class RoonMcpServer {
     );
 
     this.server.registerTool(
+      "enqueue_append",
+      {
+        title: "Append curated items to the end of a Roon queue",
+        description:
+          "Use this to ADD to what's already queued without interrupting it " +
+          "(e.g. \"add these five tracks after what's playing\", \"queue up some " +
+          "Boards of Canada for later\", \"keep the set going with …\"). Appends " +
+          "an ordered list of curated item keys to the END of the zone's current " +
+          "queue; the current track and the rest of the queue are untouched, and " +
+          "a stopped zone stays stopped. For one item, play_now with addToQueue " +
+          "does the same; to replace the queue and start playing instead, use " +
+          "enqueue_and_play. Pass itemKeys from recent get_tracks_for / " +
+          "search_music results (use them promptly — they are session-scoped). " +
+          "zoneId is optional (see play_now). Returns queued/skipped counts so " +
+          "you can backfill skipped items.",
+        inputSchema: {
+          zoneId: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Target zone id or output id from list_zones. Omit to use the default " +
+                "zone (see play_now).",
+            ),
+          itemKeys: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe(
+              "Ordered item keys to append, from recent get_tracks_for or " +
+                "search_music results (tracks, albums, artists, etc.).",
+            ),
+        },
+      },
+      handle((args) => this.playback.enqueueAppend(args)),
+    );
+
+    this.server.registerTool(
       "now_playing",
       {
         title: "Get the currently-playing track in a Roon zone",

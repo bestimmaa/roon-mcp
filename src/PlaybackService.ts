@@ -11,6 +11,7 @@ import { nowPlayingLine, ZoneService } from "./ZoneService.js";
 import {
   RoonMcpError,
   type EnqueueAndPlayInput,
+  type EnqueueAppendInput,
   type EnqueueAndPlayOutput,
   type PlaybackResult,
   type PlayNowInput,
@@ -286,6 +287,48 @@ export class PlaybackService {
         `Queued ${queued} of ${requested} item(s)` +
         (skipped.length > 0 ? `, skipped ${skipped.length}.` : ".") +
         (shuffleNote ?? "");
+
+      return { ok: queued > 0, zoneId: targetId, queued, requested, skipped, nowPlaying, message };
+    });
+  }
+
+  /**
+   * Append curated item keys, in order, to the END of the zone's current queue
+   * without touching what's playing — the batch counterpart of `playNow` with
+   * `addToQueue`, as `enqueueAndPlay` is of plain `playNow`. Every item goes
+   * through "Add to Queue" / "Queue"; items that can't be queued are skipped
+   * and reported so the agent can backfill. Playback state is left alone (a
+   * stopped zone stays stopped), so `nowPlaying` is read directly rather than
+   * waiting for a track change that an append never causes.
+   */
+  async enqueueAppend(input: EnqueueAppendInput): Promise<EnqueueAndPlayOutput> {
+    const { targetId } = await this.zones.resolveTarget(input.zoneId);
+
+    const requested = input.itemKeys.length;
+    if (requested === 0) {
+      return {
+        ok: false,
+        zoneId: targetId,
+        queued: 0,
+        requested: 0,
+        skipped: [],
+        message: "No item keys were provided.",
+      };
+    }
+
+    return this.browse.runExclusive(async () => {
+      const skipped: Array<{ itemKey: string; reason: string }> = [];
+      let queued = 0;
+      for (const key of input.itemKeys) {
+        const outcome = await this.queueOne(key, targetId, QUEUE_LABELS);
+        if (outcome.ok) queued++;
+        else skipped.push({ itemKey: key, reason: outcome.reason });
+      }
+
+      const nowPlaying = await this.zones.nowPlayingFor(targetId);
+      const message =
+        `Appended ${queued} of ${requested} item(s) to the queue` +
+        (skipped.length > 0 ? `, skipped ${skipped.length}.` : ".");
 
       return { ok: queued > 0, zoneId: targetId, queued, requested, skipped, nowPlaying, message };
     });
