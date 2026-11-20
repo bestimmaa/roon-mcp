@@ -737,10 +737,13 @@ export function toToolError(err: unknown) {
   // problems (issue #13).
   const code = err instanceof RoonMcpError ? err.code : "INTERNAL_ERROR";
   const message = err instanceof Error ? err.message : String(err);
+  // A RoonMcpError's optional `details` carries the structured specifics
+  // (e.g. LibraryExportService's { requested, served } offsets) — pass them
+  // through so the agent sees them, not just the prose message.
+  const details = err instanceof RoonMcpError ? err.details : undefined;
+  const error = details === undefined ? { code, message } : { code, message, details };
   return {
     isError: true as const,
-    content: [
-      { type: "text" as const, text: JSON.stringify({ error: { code, message } }, null, 2) },
-    ],
+    content: [{ type: "text" as const, text: JSON.stringify({ error }, null, 2) }],
   };
 }

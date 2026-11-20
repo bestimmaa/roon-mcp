@@ -5,7 +5,7 @@ import { toToolError } from "./RoonMcpServer.js";
 import { RoonMcpError } from "./types.js";
 
 /** Decode the JSON error body carried in the text content of a tool result. */
-function errorBody(result: ReturnType<typeof toToolError>): { code: string; message: string } {
+function errorBody(result: ReturnType<typeof toToolError>): { code: string; message: string; details?: unknown } {
   assert.equal(result.isError, true);
   const text = result.content[0]!.text;
   return JSON.parse(text).error;
@@ -30,4 +30,20 @@ test("toToolError preserves a RoonMcpError's own code", () => {
   const out = errorBody(toToolError(err));
   assert.equal(out.code, "ZONE_NOT_FOUND");
   assert.equal(out.message, "Zone gone.");
+});
+test("toToolError passes a RoonMcpError's details through to the agent", () => {
+  // e.g. LibraryExportService's offset-mismatch error carries the numbers.
+  const err = new RoonMcpError("BROWSE_FAILED", "Roon served page offset 0 for requested offset 100.", {
+    requested: 100,
+    served: 0,
+  });
+  const out = errorBody(toToolError(err));
+  assert.equal(out.code, "BROWSE_FAILED");
+  assert.deepEqual(out.details, { requested: 100, served: 0 });
+});
+
+test("toToolError omits details when there are none", () => {
+  const out = errorBody(toToolError(new RoonMcpError("ZONE_NOT_FOUND", "Zone gone.")));
+  assert.equal("details" in out, false);
+  assert.equal("details" in errorBody(toToolError(new Error("boom"))), false);
 });
