@@ -366,7 +366,8 @@ export class TrackExpansionService {
   }
 }
 
-function splitByHeaders(items: BrowseItem[]): Array<{ header?: string; items: BrowseItem[] }> {
+/** Group a loaded page's rows by their `hint: "header"` rows (also used by ItemInfoService). */
+export function splitByHeaders(items: BrowseItem[]): Array<{ header?: string; items: BrowseItem[] }> {
   const sections: Array<{ header?: string; items: BrowseItem[] }> = [];
   let current: { header?: string; items: BrowseItem[] } = { items: [] };
   for (const item of items) {

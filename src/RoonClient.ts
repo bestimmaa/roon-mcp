@@ -359,6 +359,25 @@ export class RoonClient {
   }
 
   /**
+   * Host and HTTP port of the paired Core's web API, which serves the image
+   * endpoint (`/api/image/{image_key}`). The host is the address the moo
+   * websocket dialed; the port comes from the Core's registration reply.
+   * Returns `undefined` when the connection doesn't expose them — neither
+   * field is part of the documented API surface, though both are present on
+   * every observed pairing (discovery and direct connect alike).
+   * Throws if unpaired.
+   */
+  getCoreHttpEndpoint(): { host: string; port: number } | undefined {
+    if (!this.core) {
+      throw new RoonMcpError("NO_CORE_PAIRED", "No Roon Core is currently paired.");
+    }
+    const host = this.core.moo?.transport?.host;
+    const port = this.core.registration?.http_port;
+    if (!host || typeof port !== "number") return undefined;
+    return { host, port };
+  }
+
+  /**
    * The `subscribe_zones` registry, keyed by `core_id`. Read services use
    * this to read the cached zone snapshot and to wait for the next change
    * after a playback action. Returns `undefined` when no Core is paired.
